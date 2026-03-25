@@ -323,14 +323,12 @@ internal object TunnelRuntime {
     }
 
     private fun startSelection(selection: TunnelBinarySelection, token: String): TunnelShellResult {
-        if (selection.launchMode == TunnelLaunchMode.APP) {
-            return startAppProcess(selection, token)
-        }
         val escapedBinaryPath = escapeForSingleQuotes(selection.path)
         val escapedToken = escapeForSingleQuotes(token)
-        val startCommand = when (selection.id) {
-            binarySourceTermux -> "rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
-            else -> "chmod 755 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
+        val startCommand = when (selection.launchMode) {
+            TunnelLaunchMode.APP -> "chmod 700 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
+            TunnelLaunchMode.ROOT -> "chmod 755 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
+            TunnelLaunchMode.TERMUX -> "rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
         }
         return runSelectionCommand(selection, startCommand, 15_000)
     }
@@ -619,32 +617,6 @@ internal object TunnelRuntime {
             "mkdir -p '/data/local/tmp' && cp '$escapedSource' '$downloadedBinaryPath' && chmod 755 '$downloadedBinaryPath'",
             30_000,
         )
-    }
-
-    private fun startAppProcess(selection: TunnelBinarySelection, token: String): TunnelShellResult {
-        return try {
-            val logFile = File(selection.logPath)
-            val pidFile = File(selection.pidPath)
-            logFile.parentFile?.mkdirs()
-            pidFile.parentFile?.mkdirs()
-            logFile.delete()
-            pidFile.delete()
-            val process = ProcessBuilder(
-                selection.path,
-                "tunnel",
-                "--no-autoupdate",
-                "run",
-                "--token",
-                token,
-            )
-                .redirectErrorStream(true)
-                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-                .start()
-            pidFile.writeText(process.pid().toString())
-            TunnelShellResult(executable = selection.path, exitCode = 0, stdout = process.pid().toString())
-        } catch (t: Throwable) {
-            TunnelShellResult(executable = selection.path, exitCode = -1, stdout = t.message.orEmpty())
-        }
     }
 
     private fun runSelectionCommand(
