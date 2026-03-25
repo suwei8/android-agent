@@ -111,7 +111,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class AppTab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    Overview("概览", Icons.Default.Dashboard),
+    Overview("总览", Icons.Default.Dashboard),
     Nodes("节点", Icons.Default.Dns),
     Network("网络", Icons.Default.SwapHoriz),
     Remote("远程", Icons.Default.Cloud),
@@ -119,7 +119,7 @@ private enum class AppTab(val label: String, val icon: androidx.compose.ui.graph
 }
 
 private enum class NodeType(val label: String, val defaultPort: Int, val subtitle: String) {
-    Socks5("SOCKS5", 1080, "兼容脚本、客户端和通用代理场景"),
+    Socks5("SOCKS5", 1080, "适合脚本、客户端和通用代理流量"),
     Http("HTTP", 8080, "适合浏览器和支持 HTTP 代理的软件"),
 }
 
@@ -127,7 +127,7 @@ private enum class NodeStatus(val label: String, val color: Color) {
     Running("运行中", Color(0xFF1E8E3E)),
     Stopped("已停止", Color(0xFF6B7280)),
     Starting("启动中", Color(0xFFF59E0B)),
-    Error("异常", Color(0xFFDC2626)),
+    Error("错误", Color(0xFFDC2626)),
 }
 
 private data class ProxyNode(
@@ -191,6 +191,31 @@ private data class SettingsState(
     val auditLogs: Boolean,
 )
 
+private const val rotateModeAirplane = "飞行模式重连"
+private const val rotateModeCellular = "移动数据重连"
+
+private fun localizeNetworkLabel(label: String): String = when (label) {
+    "Detecting" -> "检测中"
+    "Loading..." -> "加载中..."
+    "Unavailable" -> "不可用"
+    "Never" -> "从未"
+    "In progress" -> "进行中"
+    "Disconnected" -> "未连接"
+    "Connected" -> "已连接"
+    "Cellular" -> "蜂窝网络"
+    "Wi‑Fi", "Wi-Fi" -> "Wi-Fi"
+    "Ethernet" -> "以太网"
+    else -> label
+}
+
+private fun localizeTaskStatus(status: String): String = when (status) {
+    "queued" -> "排队中"
+    "running" -> "运行中"
+    "succeeded" -> "已完成"
+    "failed" -> "失败"
+    else -> status
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MobileAgentDemoApp() {
@@ -208,10 +233,10 @@ private fun MobileAgentDemoApp() {
         mutableStateOf(
             NetworkState(
                 activeNetwork = "检测中",
-                ipv6 = "获取中...",
+                ipv6 = "加载中...",
                 wifiConnected = false,
-                lastRotateAt = "未执行",
-                rotateMode = "飞行模式重连",
+                lastRotateAt = "从未",
+                rotateMode = rotateModeAirplane,
                 holdSeconds = 10,
                 lastError = null,
                 diagnostics = emptyList(),
@@ -235,7 +260,7 @@ private fun MobileAgentDemoApp() {
                 binaryPath = "/data/local/tmp/cloudflared",
                 binaryReady = false,
                 binaryVersion = null,
-                downloadStatus = "待下载",
+                downloadStatus = "未下载",
                 deviceAbi = "检测中",
                 pid = null,
                 logLines = emptyList(),
@@ -271,11 +296,11 @@ private fun MobileAgentDemoApp() {
 
     fun copyLines(label: String, lines: List<String>) {
         if (lines.isEmpty()) {
-            toast("$label 暂无内容可复制")
+            toast("暂无${label}可复制")
             return
         }
         clipboard.setText(AnnotatedString(lines.joinToString(separator = "\n")))
-        toast("$label 已复制")
+        toast("${label}已复制")
     }
 
     fun applyTunnelStatus(status: TunnelStatusSnapshot) {
@@ -302,13 +327,7 @@ private fun MobileAgentDemoApp() {
         return RotateTask(
             id = id,
             title = title,
-            status = when (status) {
-                "queued" -> "排队中"
-                "running" -> "执行中"
-                "succeeded" -> "已成功"
-                "failed" -> "失败"
-                else -> status
-            },
+            status = localizeTaskStatus(status),
             detail = detail,
             debugLines = debugLines,
         )
@@ -327,12 +346,12 @@ private fun MobileAgentDemoApp() {
         tasks.addAll(runtimeTasks)
         val latestTask = runtimeTasks.firstOrNull()
         networkState = networkState.copy(
-            activeNetwork = snapshot.preferredNetworkLabel,
-            ipv6 = snapshot.currentIpv6 ?: "未获取",
+            activeNetwork = localizeNetworkLabel(snapshot.preferredNetworkLabel),
+            ipv6 = snapshot.currentIpv6 ?: "不可用",
             wifiConnected = snapshot.wifiConnected,
             lastRotateAt = when (latestTask?.status) {
-                "执行中", "排队中" -> "进行中"
-                "已成功" -> "刚刚"
+                "运行中", "排队中" -> "进行中"
+                "已完成" -> "刚刚"
                 "失败" -> "失败"
                 else -> networkState.lastRotateAt
             },
@@ -395,11 +414,11 @@ private fun MobileAgentDemoApp() {
                 title = {
                     Text(
                         text = when (AppTab.entries[selectedTab]) {
-                            AppTab.Overview -> "Mobile Agent Demo"
+                            AppTab.Overview -> "移动代理"
                             AppTab.Nodes -> "代理节点"
                             AppTab.Network -> "网络控制"
-                            AppTab.Remote -> "远程管理"
-                            AppTab.Settings -> "设置"
+                            AppTab.Remote -> "远程控制"
+                            AppTab.Settings -> "运行设置"
                         }
                     )
                 }
@@ -409,7 +428,7 @@ private fun MobileAgentDemoApp() {
         floatingActionButton = {
             if (AppTab.entries[selectedTab] == AppTab.Nodes) {
                 FloatingActionButton(onClick = { showCreateNodeDialog = true }) {
-                    Icon(Icons.Default.Add, contentDescription = "新建节点")
+                    Icon(Icons.Default.Add, contentDescription = "创建节点")
                 }
             }
         },
@@ -435,7 +454,7 @@ private fun MobileAgentDemoApp() {
                 tasks = tasks,
                 onQuickRotate = {
                     scope.launch {
-                        runRealRotateTask("一键换 IP")
+                        runRealRotateTask("快速切换 IP")
                     }
                 },
 
@@ -452,15 +471,15 @@ private fun MobileAgentDemoApp() {
                 onNodeClick = { selectedNode = it },
                 onStartNode = { node ->
                     updateNode(node.copy(status = NodeStatus.Running, lastStarted = "刚刚"))
-                    toast("${node.name} 已启动")
+                    toast("${node.name}已启动")
                 },
                 onStopNode = { node ->
                     updateNode(node.copy(status = NodeStatus.Stopped, currentConnections = 0))
-                    toast("${node.name} 已停止")
+                    toast("${node.name}已停止")
                 },
                 onCopyAddress = { node ->
                     clipboard.setText(AnnotatedString("[${node.host}]:${node.port}"))
-                    toast("访问地址已复制")
+                    toast("节点地址已复制")
                 }
             )
 
@@ -470,7 +489,7 @@ private fun MobileAgentDemoApp() {
                 tasks = tasks,
                 onRotate = {
                     scope.launch {
-                        runRealRotateTask("更换出口 IP")
+                        runRealRotateTask("切换出口 IP")
                     }
                 },
                 onRefresh = {
@@ -480,11 +499,11 @@ private fun MobileAgentDemoApp() {
                 },
                 onToggleMode = {
                     networkState = networkState.copy(
-                        rotateMode = if (networkState.rotateMode == "飞行模式重连") "移动数据重连" else "飞行模式重连"
+                        rotateMode = if (networkState.rotateMode == rotateModeAirplane) rotateModeCellular else rotateModeAirplane
                     )
                 },
-                onCopyDiagnostics = { copyLines("诊断日志", it) },
-                onCopyTaskLogs = { title, lines -> copyLines("$title 调试日志", lines) },
+                onCopyDiagnostics = { copyLines("诊断信息", it) },
+                onCopyTaskLogs = { title, lines -> copyLines("${title}调试日志", lines) },
             )
 
 
@@ -500,14 +519,14 @@ private fun MobileAgentDemoApp() {
                     scope.launch {
                         val status = TunnelRuntime.bind(context, remoteTokenInput, remoteDomainInput)
                         applyTunnelStatus(status)
-                        snackbarHostState.showSnackbar("Tunnel Token 已保存")
+                        snackbarHostState.showSnackbar("隧道配置已保存")
                     }
                 },
                 onDownload = {
                     scope.launch {
                         val status = TunnelRuntime.downloadBinary(context, force = true)
                         applyTunnelStatus(status)
-                        snackbarHostState.showSnackbar(if (status.binaryReady) "Android 版 cloudflared 已安装" else (status.lastError ?: "cloudflared 下载失败"))
+                        snackbarHostState.showSnackbar(if (status.binaryReady) "内置 cloudflared 已安装" else (status.lastError ?: "cloudflared 下载失败"))
 
                     }
                 },
@@ -532,7 +551,7 @@ private fun MobileAgentDemoApp() {
                 },
                 onTest = {
                     scope.launch {
-                        val domainLabel = remoteState.domain.takeIf { it.isNotBlank() && it != "未配置" } ?: "当前未填写域名"
+                        val domainLabel = remoteState.domain.takeIf { it.isNotBlank() && it != "未配置" } ?: "未配置域名"
                         snackbarHostState.showSnackbar("$domainLabel -> http://${remoteState.localApi}")
                     }
                 },
@@ -604,11 +623,11 @@ private fun OverviewScreen(
                 shape = RoundedCornerShape(24.dp)
             ) {
                 Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("手机版 3x-ui 控制台", color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("管理代理节点、远程隧道和换 IP 任务，当前 UI 为可交互 Demo。", color = Color(0xFFD0D5DD))
+                    Text("移动代理控制台", color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text("集中管理代理节点、远程隧道和出口 IP 切换任务。当前界面仍是可运行原型，但已适合继续迭代。", color = Color(0xFFD0D5DD))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         FilledTonalButton(onClick = onNewNode) { Text("新建节点") }
-                        Button(onClick = onQuickRotate) { Text("一键换 IP") }
+                        Button(onClick = onQuickRotate) { Text("快速切换") }
                         OutlinedButton(onClick = onCopyIp) { Text("复制当前 IPv6") }
                     }
                 }
@@ -619,21 +638,21 @@ private fun OverviewScreen(
                 OverviewStatCard(title = "代理核心", value = if (nodes.any { it.status == NodeStatus.Running }) "运行中" else "已停止", icon = Icons.Default.Router)
                 OverviewStatCard(title = "远程隧道", value = remoteState.tunnelStatus, icon = Icons.Default.Cloud)
                 OverviewStatCard(title = "当前网络", value = networkState.activeNetwork, icon = if (networkState.activeNetwork == "蜂窝网络") Icons.Default.CellTower else Icons.Default.Language)
-                OverviewStatCard(title = "已启用节点", value = nodes.count { it.status == NodeStatus.Running }.toString(), icon = Icons.Default.Dns)
+                OverviewStatCard(title = "活跃节点", value = nodes.count { it.status == NodeStatus.Running }.toString(), icon = Icons.Default.Dns)
             }
         }
         item {
-            SectionTitle(title = "当前出口 IP", subtitle = "远程设备访问前，先确认手机当前 IPv6")
+            SectionTitle(title = "当前出口 IP", subtitle = "开放远程访问前，先确认手机当前的 IPv6 地址")
             KeyValueCard(
                 pairs = listOf(
                     "IPv6 地址" to networkState.ipv6,
-                    "换 IP 方式" to networkState.rotateMode,
+                    "切换模式" to networkState.rotateMode,
                     "最近切换" to networkState.lastRotateAt,
                 )
             )
         }
         item {
-            SectionTitle(title = "最近任务", subtitle = "展示换 IP 与远程控制的执行结果")
+            SectionTitle(title = "最近任务", subtitle = "显示最新的 IP 切换和远程控制任务结果")
         }
         items(tasks.take(3)) { task ->
             Card(shape = RoundedCornerShape(20.dp)) {
@@ -641,8 +660,8 @@ private fun OverviewScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(task.title, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                         StatusBadge(label = task.status, color = when (task.status) {
-                            "已成功" -> NodeStatus.Running.color
-                            "等待网络恢复" -> NodeStatus.Starting.color
+                            "已完成" -> NodeStatus.Running.color
+                            "运行中", "排队中" -> NodeStatus.Starting.color
                             else -> NodeStatus.Error.color
                         })
                     }
@@ -666,7 +685,7 @@ private fun NodesScreen(
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("还没有代理节点", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("创建一个 SOCKS5 或 HTTP 节点，让其他设备通过这台手机访问网络")
+                Text("创建 SOCKS5 或 HTTP 节点后，其他设备就可以通过这台手机访问网络")
             }
         }
         return
@@ -678,7 +697,7 @@ private fun NodesScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            SectionTitle(title = "节点列表", subtitle = "卡片式管理，更适合手机操作")
+            SectionTitle(title = "节点列表", subtitle = "以卡片形式管理节点，适合手机屏幕操作")
         }
         items(nodes, key = { it.id }) { node ->
             Card(
@@ -701,8 +720,8 @@ private fun NodesScreen(
                         StatusBadge(label = node.status.label, color = node.status.color)
                     }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TinyInfoChip(icon = Icons.Default.Lock, label = if (node.authEnabled) "已开启认证" else "匿名访问")
-                        TinyInfoChip(icon = Icons.Default.Sync, label = "连接 ${node.currentConnections}")
+                        TinyInfoChip(icon = Icons.Default.Lock, label = if (node.authEnabled) "已启用认证" else "匿名访问")
+                        TinyInfoChip(icon = Icons.Default.Sync, label = "连接数 ${node.currentConnections}")
                         TinyInfoChip(icon = Icons.Default.PowerSettingsNew, label = "最近启动 ${node.lastStarted}")
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -741,15 +760,15 @@ private fun NetworkScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
-            SectionTitle(title = "当前网络状态", subtitle = "控制手机出口网络与换 IP 任务")
+            SectionTitle(title = "当前网络状态", subtitle = "控制出口连通性和 IP 切换")
         }
         item {
             KeyValueCard(
                 pairs = listOf(
                     "当前网络" to networkState.activeNetwork,
                     "当前 IPv6" to networkState.ipv6,
-                    "Wi‑Fi 状态" to if (networkState.wifiConnected) "已连接" else "未连接",
-                    "上次换 IP" to networkState.lastRotateAt,
+                    "Wi-Fi" to if (networkState.wifiConnected) "已连接" else "未连接",
+                    "最近切换" to networkState.lastRotateAt,
                     "最近错误" to (networkState.lastError ?: "无"),
                 )
             )
@@ -757,23 +776,23 @@ private fun NetworkScreen(
         item {
             Card(shape = RoundedCornerShape(22.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("更换出口 IP", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("执行期间网络会短暂中断；现在会展示 root 命令、默认路由和 IPv6 采集诊断")
+                    Text("切换出口 IP", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("切换期间网络会短暂断开。诊断信息会记录 Root 命令、默认路由和 IPv6 采集细节。")
 
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         TinyInfoChip(icon = Icons.Default.SwapHoriz, label = networkState.rotateMode)
                         TinyInfoChip(icon = Icons.Default.Sync, label = "保持 ${networkState.holdSeconds} 秒")
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = onRotate) { Text("立即更换") }
-                        OutlinedButton(onClick = onRefresh) { Text("刷新状态") }
-                        OutlinedButton(onClick = onToggleMode) { Text("切换方式") }
+                        Button(onClick = onRotate) { Text("立即切换") }
+                        OutlinedButton(onClick = onRefresh) { Text("刷新") }
+                        OutlinedButton(onClick = onToggleMode) { Text("切换模式") }
                     }
                 }
             }
         }
         item {
-            SectionTitle(title = "最近诊断", subtitle = "用于定位 root、飞行模式和 IPv6 恢复问题")
+            SectionTitle(title = "最近诊断", subtitle = "用于检查 Root 权限、飞行模式切换和 IPv6 恢复过程")
         }
         item {
             DiagnosticsCard(
@@ -783,7 +802,7 @@ private fun NetworkScreen(
         }
 
         item {
-            SectionTitle(title = "最近任务", subtitle = "建议将换 IP 设计为异步任务")
+            SectionTitle(title = "最近任务", subtitle = "出口 IP 切换会作为异步任务记录")
         }
         items(tasks.take(5)) { task ->
             Card(shape = RoundedCornerShape(18.dp)) {
@@ -799,7 +818,7 @@ private fun NetworkScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text("调试日志", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            TextButton(onClick = { onCopyTaskLogs(task.title, task.debugLines) }) { Text("复制全部") }
+                            TextButton(onClick = { onCopyTaskLogs(task.title, task.debugLines) }) { Text("全部复制") }
                         }
                         task.debugLines.takeLast(6).forEach { line ->
                             Text(line, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
@@ -836,7 +855,7 @@ private fun RemoteScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
-            SectionTitle(title = "Cloudflare Tunnel", subtitle = "控制面走 Tunnel，数据面仍由本地代理节点承载")
+            SectionTitle(title = "Cloudflare Tunnel", subtitle = "控制面通过 Tunnel 暴露，本地数据流量仍由代理节点承载")
         }
         item {
             Card(shape = RoundedCornerShape(22.dp)) {
@@ -845,7 +864,7 @@ private fun RemoteScreen(
                         value = remoteTokenInput,
                         onValueChange = onTokenChange,
                         label = { Text("Tunnel Token") },
-                        supportingText = { Text("保存 token 后，首次启动会自动下载并安装 Android 版 cloudflared") },
+                        supportingText = { Text("保存后首次启动会自动下载并安装内置 Android 版 cloudflared") },
 
                         modifier = Modifier.fillMaxWidth(),
                         maxLines = 3
@@ -855,14 +874,14 @@ private fun RemoteScreen(
                         value = remoteDomainInput,
                         onValueChange = onDomainChange,
                         label = { Text("预期域名") },
-                        supportingText = { Text("可选，用于显示你在 Cloudflare 后台绑定的域名") },
+                        supportingText = { Text("可选，用于展示你在 Cloudflare 绑定的主机名") },
                         modifier = Modifier.fillMaxWidth(),
                         maxLines = 1
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = onBind) { Text("保存配置") }
-                        OutlinedButton(onClick = onDownload) { Text("下载/更新") }
-                        OutlinedButton(onClick = onRefresh) { Text("刷新状态") }
+                        OutlinedButton(onClick = onDownload) { Text("下载 / 更新") }
+                        OutlinedButton(onClick = onRefresh) { Text("刷新") }
                     }
 
                 }
@@ -872,18 +891,17 @@ private fun RemoteScreen(
             KeyValueCard(
                 pairs = listOf(
                     "隧道状态" to remoteState.tunnelStatus,
-                    "进程状态" to if (remoteState.running) "运行中" else "未运行",
-                    "访问域名" to remoteState.domain,
-
+                    "进程" to if (remoteState.running) "运行中" else "已停止",
+                    "主机名" to remoteState.domain,
                     "本地 API" to remoteState.localApi,
                     "设备 ABI" to remoteState.deviceAbi,
                     "二进制路径" to remoteState.binaryPath,
-                    "二进制状态" to if (remoteState.binaryReady) "已就绪" else "未安装",
+                    "二进制状态" to if (remoteState.binaryReady) "就绪" else "缺失",
                     "下载状态" to remoteState.downloadStatus,
-                    "当前版本" to (remoteState.binaryVersion ?: "未知"),
-                    "进程 PID" to (remoteState.pid ?: "未运行"),
-                    "自动重连" to if (remoteState.autoReconnect) "已开启" else "已关闭",
-                    "开机启动" to if (remoteState.autoStart) "已开启" else "已关闭",
+                    "版本" to (remoteState.binaryVersion ?: "未知"),
+                    "PID" to (remoteState.pid ?: "未运行"),
+                    "自动重连" to if (remoteState.autoReconnect) "已启用" else "已禁用",
+                    "开机自启" to if (remoteState.autoStart) "已启用" else "已禁用",
                     "最近错误" to (remoteState.lastError ?: "无"),
                 )
             )
@@ -893,7 +911,7 @@ private fun RemoteScreen(
             Card(shape = RoundedCornerShape(22.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("本地控制 API", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("cloudflared 会把域名请求转发到手机上的本地 API；若未安装，启动时会先自动下载应用内 Android 版", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("cloudflared 会把公网域名请求转发到手机本地 API。如果缺少二进制文件，启动时会优先下载内置 Android 构建。", color = MaterialTheme.colorScheme.onSurfaceVariant)
 
 
                     Text("GET  /api/health", style = MaterialTheme.typography.bodySmall)
@@ -909,11 +927,11 @@ private fun RemoteScreen(
                     Text(if (remoteState.running) "停止隧道" else "启动隧道")
                 }
 
-                OutlinedButton(onClick = onTest) { Text("查看连通性") }
+                OutlinedButton(onClick = onTest) { Text("检查路由") }
             }
         }
         item {
-            SectionTitle(title = "最近日志", subtitle = "读取 cloudflared 最近输出，便于定位绑定失败")
+            SectionTitle(title = "最近日志", subtitle = "查看最新 cloudflared 输出，用于诊断启动和绑定问题")
         }
         item {
             DiagnosticsCard(
@@ -938,12 +956,12 @@ private fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
-            SectionTitle(title = "运行设置", subtitle = "第一版保留最关键的常驻与安全开关")
+            SectionTitle(title = "运行设置", subtitle = "当前原型仅保留最关键的持久化和安全开关")
         }
         item {
             ToggleCard(
-                title = "前台服务常驻",
-                subtitle = "避免后台被杀后导致 Tunnel 与代理节点中断",
+                title = "保持前台服务存活",
+                subtitle = "降低应用被系统回收后隧道和代理中断的风险",
                 checked = settings.keepServiceAlive,
                 onCheckedChange = { onSettingsChange(settings.copy(keepServiceAlive = it)) }
             )
@@ -951,7 +969,7 @@ private fun SettingsScreen(
         item {
             ToggleCard(
                 title = "优先使用蜂窝网络",
-                subtitle = "测试阶段建议开启，避免代理流量走 Wi‑Fi",
+                subtitle = "测试阶段建议开启，避免代理流量走 Wi-Fi",
                 checked = settings.preferCellular,
                 onCheckedChange = { onSettingsChange(settings.copy(preferCellular = it)) }
             )
@@ -959,7 +977,7 @@ private fun SettingsScreen(
         item {
             ToggleCard(
                 title = "保留审计日志",
-                subtitle = "记录节点启动、远程请求和换 IP 执行结果",
+                subtitle = "记录节点启动、远程请求和 IP 切换结果",
                 checked = settings.auditLogs,
                 onCheckedChange = { onSettingsChange(settings.copy(auditLogs = it)) }
             )
@@ -987,7 +1005,7 @@ private fun CreateNodeDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("新建节点") },
+        title = { Text("创建节点") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -1019,7 +1037,7 @@ private fun CreateNodeDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth()
                 )
-                ToggleMiniRow(title = "开启用户名密码", checked = authEnabled, onCheckedChange = { authEnabled = it })
+                ToggleMiniRow(title = "启用用户名和密码", checked = authEnabled, onCheckedChange = { authEnabled = it })
                 if (authEnabled) {
                     OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("用户名") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(
@@ -1085,14 +1103,14 @@ private fun NodeDetailDialog(
                 }
                 HorizontalDivider()
 
-                Text("访问认证：${if (node.authEnabled) "已开启" else "未开启"}")
+                Text("认证：${if (node.authEnabled) "已启用" else "已禁用"}")
                 if (node.authEnabled) {
                     Text("用户名：${node.username}")
                     Text("密码：${node.password}")
                 }
-                Text("当前连接：${node.currentConnections}")
+                Text("连接数：${node.currentConnections}")
                 Text("最近启动：${node.lastStarted}")
-                Text("请确认当前网络环境允许通过手机 IPv6 访问此端口", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("请确认当前网络环境允许通过手机 IPv6 地址访问这个端口。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
         confirmButton = {
@@ -1160,14 +1178,14 @@ private fun DiagnosticsCard(
     Card(shape = RoundedCornerShape(22.dp)) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (visibleLines.isEmpty()) {
-                Text("暂无诊断信息，点击“刷新状态”或执行一次“立即更换”后会显示详情", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("还没有诊断信息。点击“刷新”或先执行一次“立即切换”后，这里会显示详细内容。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 if (onCopyAll != null) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.End,
                     ) {
-                        TextButton(onClick = { onCopyAll(lines) }) { Text("复制全部") }
+                        TextButton(onClick = { onCopyAll(lines) }) { Text("全部复制") }
                     }
                 }
                 visibleLines.forEachIndexed { index, line ->
@@ -1298,21 +1316,21 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
 private fun sampleTasks(): List<RotateTask> = listOf(
     RotateTask(
         id = "rot-001",
-        title = "更换出口 IP",
-        status = "已成功",
-        detail = "新的 IPv6 已更新，Tunnel 自动重连完成",
+        title = "切换出口 IP",
+        status = "已完成",
+        detail = "已检测到新的 IPv6，隧道也已完成重连",
     ),
     RotateTask(
         id = "tun-001",
         title = "绑定远程隧道",
-        status = "已成功",
-        detail = "Cloudflare Tunnel 已连接到本地 API 127.0.0.1:18080",
+        status = "已完成",
+        detail = "Cloudflare Tunnel 已连接到 127.0.0.1:18080 本地 API",
     ),
     RotateTask(
         id = "xray-001",
         title = "重启代理核心",
-        status = "等待网络恢复",
-        detail = "等待蜂窝网络恢复后拉起 Xray 核心",
+        status = "运行中",
+        detail = "正在等待蜂窝网络恢复后启动代理核心",
     )
 )
 

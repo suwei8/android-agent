@@ -40,17 +40,17 @@ internal class RootNetworkController {
     suspend fun rotateIp(holdSeconds: Int): RotateResult = withContext(Dispatchers.IO) {
         val debugLog = mutableListOf<String>()
         val before = refreshSnapshotBlocking(debugLog, stage = "切换前")
-        debugLog += "切换前网络：${before.preferredNetworkLabel}，IPv6：${before.currentIpv6 ?: "未获取"}"
+        debugLog += "切换前网络=${before.preferredNetworkLabel}，IPv6=${before.currentIpv6 ?: "不可用"}"
 
         val rootCheck = runRootCommand("id", timeoutMs = 20_000)
-        debugLog += summarizeCommand("Root 检测", rootCheck)
+        debugLog += summarizeCommand("Root 检查", rootCheck)
         if (rootCheck.exitCode != 0 || !rootCheck.stdout.contains("uid=0")) {
             return@withContext RotateResult(
                 success = false,
                 oldIpv6 = before.currentIpv6,
                 newIpv6 = before.currentIpv6,
                 ipChanged = false,
-                message = "未获得 root 权限，请在 Magisk 中允许此应用后重试",
+                message = "未获得 Root 权限。请在 Magisk 中允许此应用后重试。",
                 debugLog = debugLog,
             )
         }
@@ -68,7 +68,7 @@ internal class RootNetworkController {
             )
         }
 
-        debugLog += "飞行模式保持 ${hold} 秒"
+        debugLog += "保持飞行模式开启 ${hold} 秒"
         Thread.sleep(hold * 1000L)
 
         val disableResult = setAirplaneMode(enabled = false, debugLog = debugLog)
@@ -97,7 +97,7 @@ internal class RootNetworkController {
                 oldIpv6 = before.currentIpv6,
                 newIpv6 = null,
                 ipChanged = false,
-                message = "网络恢复超时，未获取到新的 IPv6",
+                message = "网络恢复超时，未在限定时间内检测到新的 IPv6 地址。",
                 debugLog = debugLog,
             )
         }
@@ -109,9 +109,9 @@ internal class RootNetworkController {
             newIpv6 = newIpv6,
             ipChanged = ipChanged,
             message = if (ipChanged) {
-                "飞行模式切换完成，新的 IPv6 已生效"
+                "飞行模式切换完成，新的 IPv6 地址已生效。"
             } else {
-                "网络已恢复，但 IPv6 未发生变化"
+                "网络已经恢复，但 IPv6 地址没有变化。"
             },
             debugLog = debugLog,
         )
@@ -129,29 +129,29 @@ internal class RootNetworkController {
             defaultInterface = defaultInterface,
         )
         val details = buildList {
-            stage?.let { add("${it}：${summarizeCommand("IPv6 地址采集", addrResult)}") }
-            stage?.let { add("${it}：${summarizeCommand("默认路由", routeResult)}") }
-            add("系统活跃网络：${activeNetwork.transportLabel}")
-            add("系统活跃接口：${activeNetwork.interfaceName ?: "未识别"}")
+            stage?.let { add("$it：${summarizeCommand("IPv6 采集", addrResult)}") }
+            stage?.let { add("$it：${summarizeCommand("默认路由", routeResult)}") }
+            add("当前网络：${activeNetwork.transportLabel}")
+            add("当前网卡：${activeNetwork.interfaceName ?: "未知"}")
             add(
                 if (defaultInterface.isNullOrBlank()) {
-                    "默认 IPv6 路由接口：未识别"
+                    "IPv6 默认路由网卡：未知"
                 } else {
-                    "默认 IPv6 路由接口：${defaultInterface}"
+                    "IPv6 默认路由网卡：$defaultInterface"
                 }
             )
             add(
                 if (allAddresses.isEmpty()) {
-                    "候选地址：未发现全局 IPv6"
+                    "候选地址：未发现全局 IPv6 地址"
                 } else {
-                    "候选地址：${allAddresses.joinToString("；") { "${it.interfaceName}=${it.address}" }}"
+                    "候选地址：${allAddresses.joinToString("; ") { "${it.interfaceName}=${it.address}" }}"
                 }
             )
             add(
                 if (preferred == null) {
-                    "最终选择：未获取到可用 IPv6"
+                    "最终地址：未检测到可用 IPv6 地址"
                 } else {
-                    "最终选择：${preferred.interfaceName} -> ${preferred.address}"
+                    "最终地址：${preferred.interfaceName} -> ${preferred.address}"
                 }
             )
         }
@@ -187,7 +187,7 @@ internal class RootNetworkController {
             "settings put global airplane_mode_on 0; am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false"
         }
         val fallback = runRootCommand(fallbackCommand, timeoutMs = 15_000)
-        debugLog += summarizeCommand(if (enabled) "开启飞行模式回退" else "关闭飞行模式回退", fallback)
+        debugLog += summarizeCommand(if (enabled) "开启飞行模式回退方案" else "关闭飞行模式回退方案", fallback)
         if (fallback.exitCode == 0 && verifyAirplaneMode(enabled, debugLog)) {
             return true to ""
         }
@@ -195,14 +195,14 @@ internal class RootNetworkController {
         val reason = listOf(primary.stdout, fallback.stdout)
             .map { it.trim() }
             .filter { it.isNotBlank() }
-            .joinToString("；")
-            .ifBlank { "系统命令执行失败" }
+            .joinToString("; ")
+            .ifBlank { "系统命令执行失败。" }
         return false to "切换飞行模式失败：$reason"
     }
 
     private fun verifyAirplaneMode(enabled: Boolean, debugLog: MutableList<String>): Boolean {
         val result = runRootCommand("settings get global airplane_mode_on", timeoutMs = 10_000)
-        debugLog += summarizeCommand("飞行模式状态校验", result)
+        debugLog += summarizeCommand("校验飞行模式", result)
         return result.exitCode == 0 && result.stdout.trim() == if (enabled) "1" else "0"
     }
 
@@ -273,7 +273,7 @@ internal class RootNetworkController {
     private fun summarizeCommand(label: String, result: ShellResult): String {
         val output = result.stdout.trim().replace("\n", " | ")
         val preview = output.take(180).ifBlank { "无输出" }
-        return "$label：exit=${result.exitCode} via=${result.executable} -> $preview"
+        return "$label: exit=${result.exitCode} via=${result.executable} -> $preview"
     }
 
     private fun parseGlobalIpv6Addresses(raw: String): List<InterfaceAddress> {
@@ -385,4 +385,3 @@ private data class ActiveNetworkInfo(
     val transportLabel: String = "未连接",
     val wifiConnected: Boolean = false,
 )
-

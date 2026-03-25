@@ -99,6 +99,7 @@ Current implementation detail:
 
 - preferred binary source is the bundled Android binary under `/data/local/tmp/cloudflared`
 - fallback binary source is `com.termux` under `/data/data/com.termux/files/usr/bin/cloudflared`
+- bundled download resolution is now intentionally limited to ARM Android ABIs (`arm64-v8a` and `armeabi-v7a`) because the project is being maintained on ARM64 infrastructure and rooted ARM devices
 
 ## Data Flow
 
@@ -126,13 +127,25 @@ Current implementation detail:
 
 ## Practical Validation Strategy
 
-### Safe to Validate in Emulator
+### Canonical Build Path
+
+- develop on the ARM64 host
+- build APKs in GitHub Actions on `ubuntu-latest`
+- validate the resulting APK in Redroid on the ARM64 host
+- validate root-only behavior on a rooted real device
+
+Important constraint:
+
+- the current ARM64 server should not be treated as the source of truth for Android APK compilation
+
+### Safe to Validate in Redroid
 
 - Compose UI rendering
 - local API startup
 - button wiring
 - non-root UI state transitions
 - tunnel process lifecycle logic where root is not strictly required
+- installation, launch, and ADB-driven smoke checks of the CI-produced APK on the current OCI ARM host
 
 ### Must Be Validated on a Rooted Real Device
 
@@ -144,7 +157,6 @@ Current implementation detail:
 
 ## Known Technical Debt
 
-- many visible strings in the UI and controller code should be normalized because some prior edits introduced mojibake
-- `TunnelRuntime.kt` contains a commented legacy implementation block that should be removed once the new implementation is fully validated
+- `TunnelRuntime.kt` still needs final device validation for the Termux fallback path even after removing the legacy implementation block
 - no test suite exists yet
 - no service process exists yet for persistent operation outside the foreground activity

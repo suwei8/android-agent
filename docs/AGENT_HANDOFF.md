@@ -2,7 +2,7 @@
 
 ## Purpose of This Handoff
 
-This document is for the next agent who will continue development on a Linux ARM64 server and primarily use an Android emulator first, then return to a real rooted phone for final validation.
+This document is for the next agent who will continue development on a Linux ARM64 server while treating GitHub Actions as the canonical APK build path and Redroid as the local validation target.
 
 ## Snapshot Summary
 
@@ -13,7 +13,17 @@ Project state at handoff:
 - root-based network rotation exists
 - Cloudflare Tunnel support exists
 - repository was cleaned for GitHub handoff
-- latest tunnel runtime refactor was prepared but not fully rebuilt and re-validated before this handoff
+- GitHub Actions is now responsible for APK compilation and GitHub Releases publishing
+
+Update after ARM64 environment cleanup:
+
+- `TunnelRuntime.kt` no longer carries the legacy commented implementation block
+- bundled `cloudflared` download selection now targets ARM Android ABIs only (`arm64-v8a` and `armeabi-v7a`)
+- current OCI ARM64 host should not be treated as a native Android APK build host
+- official Android Linux resource-build tooling in this environment is still unsuitable for canonical local APK builds
+- stale local `x86_64` Android `build-tools` were removed from the active SDK path and parked outside it to avoid accidental reuse
+- Cloudflare remote tunnel config for `android-agent` was corrected to target the app's local API at `http://127.0.0.1:18080` instead of the stale `localhost:8080` mapping
+- Redroid on the OCI ARM64 host was stabilized by fixing `/dev/binder`, `/dev/hwbinder`, and `/dev/vndbinder` permissions during startup, so local APK smoke testing should now target Redroid first
 
 ## What Was Verified Before Handoff
 
@@ -68,55 +78,66 @@ Intent of the refactor:
 Important caveat:
 
 - the refactor was not fully rebuilt and confirmed before handoff
-- `TunnelRuntime.kt` currently contains a large commented legacy implementation block followed by the newer active implementation
-- the next agent should clean that file after confirming the new logic compiles and behaves correctly
+- the next agent should validate the cleaned active implementation on device, especially the fallback switch from bundled binary to Termux
 
 ## Recommended Immediate Next Steps
 
-### 1. Rebuild on the Linux ARM64 Server
+### 1. Do Not Use The ARM64 Server As The Canonical APK Build Host
 
 Goal:
 
-- confirm the current project compiles cleanly after the tunnel refactor
+- avoid wasting time treating host-tool incompatibility as repository breakage
 
 Checks:
 
-- `./gradlew assembleDebug`
-- inspect Kotlin compiler errors, especially in `TunnelRuntime.kt`
+- source editing and review are fine on ARM64
+- APK production belongs to GitHub Actions
+- if local Gradle fails in resource tooling on this host, record it as an environment limitation and move on
 
-### 2. Bring Up an Emulator
+### 2. Validate CI Artifact Production
 
 Goal:
 
-- validate that the app launches and the UI is navigable
+- ensure GitHub Actions produces a usable APK artifact or Release asset
 
 Checks:
 
-- app opens
-- local API starts on `127.0.0.1:18080`
-- refresh actions do not crash
-- remote screen renders correctly
+- push branch changes and inspect the workflow artifact
+- for tagged builds, verify the Release asset appears under GitHub Releases
+- use the produced APK as the installable binary for device testing
 
-### 3. Decide the Emulator Scope Explicitly
+### 3. Use A Real Rooted Device For Meaningful Validation
 
-The emulator can validate:
+Primary validation target:
 
-- UI
-- local API
-- persistence behavior
-- tunnel process invocation basics
+- rooted real phone
 
-The emulator cannot validate:
+Why:
 
-- real root workflows on production hardware
-- actual carrier IPv6 behavior
-- airplane-mode IP rotation semantics for the target phone
+- root shell access
+- airplane-mode toggling
+- carrier/mobile IPv6 behavior
+- real Cloudflare Tunnel behavior on the device network
+
+Emulator usage is optional and secondary, and only makes sense on a host that actually supports the Android emulator and build-tools stack.
+
+### 3a. Use Redroid For Fast Local Validation
+
+Primary local validation target:
+
+- Redroid on the OCI ARM64 host
+
+Why:
+
+- low feedback cost
+- no need for a separate x86_64 emulator workstation
+- good fit for UI, local API, and tunnel smoke tests
+- ADB install and launch are already available in the current environment
 
 ### 4. Clean the Tunnel Runtime Further
 
 Recommended cleanup:
 
-- remove the commented legacy block from `TunnelRuntime.kt`
 - normalize naming around binary source selection and log locations
 - consider adding a clearer result model for:
   - bundled success
@@ -124,15 +145,15 @@ Recommended cleanup:
   - Termux fallback success
   - total failure
 
-### 5. Normalize String Encoding
+### 5. Continue UI Copy Normalization
 
-A large part of the UI still contains mojibake text from prior edits.
+The user-facing app UI is now Chinese-first, but future edits should keep copy consistent and avoid mixed-language regressions.
 
 Recommended approach:
 
-- convert user-facing text to clean UTF-8 strings
-- move user-visible copy into `strings.xml`
-- choose one language baseline, preferably English first for development stability
+- keep user-facing copy clean UTF-8
+- continue moving reusable user-visible copy into `strings.xml` over time
+- keep the visible product language Chinese unless requirements change
 
 ## Architecture Notes for the Next Agent
 
@@ -158,12 +179,13 @@ Recommended approach:
 
 ## Suggested Development Order
 
-1. Make the repository compile cleanly.
-2. Boot the app in emulator and remove crash-level issues.
-3. Clean and normalize UI strings.
-4. Decide whether the Tunnel fallback belongs in the app long-term or should be replaced by a better DNS strategy.
-5. Return to a real rooted phone for full validation.
-6. Only after that, implement the actual proxy backend for the Nodes section.
+1. Make source changes on the ARM64 host.
+2. Use GitHub Actions to produce APKs.
+3. Install CI-produced APKs in Redroid first.
+4. Then validate root-only behavior on the real rooted phone.
+5. Continue cleaning UI strings and runtime messaging.
+6. Decide whether the Tunnel fallback belongs in the app long-term or should be replaced by a better DNS strategy.
+7. Only after that, implement the actual proxy backend for the Nodes section.
 
 ## Open Questions
 
@@ -176,6 +198,7 @@ Recommended approach:
 ## Risk Register
 
 - current tunnel code may compile but remain behaviorally unverified
-- emulator validation may create false confidence for rooted-phone features
-- current repository has no tests and no CI
+- current OCI ARM64 server is not the canonical APK build environment
+- emulator validation can create false confidence for rooted-phone features
+- current repository has no tests; CI currently covers build and release packaging only
 - committing large environment bundles must be avoided; keep the repo source-only

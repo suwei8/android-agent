@@ -61,7 +61,7 @@ internal object MobileAgentRuntime {
     @Volatile
     private var latestSnapshot = NetworkSnapshot(
         currentIpv6 = null,
-        preferredNetworkLabel = "未连接",
+        preferredNetworkLabel = "Disconnected",
         wifiConnected = false,
         details = emptyList(),
     )
@@ -99,7 +99,7 @@ internal object MobileAgentRuntime {
                 )
                 serverStatus
             } catch (e: IOException) {
-                serverStatus = serverStatus.copy(running = false, lastError = e.message ?: "本地 API 启动失败")
+                serverStatus = serverStatus.copy(running = false, lastError = e.message ?: "启动本地 API 失败。")
                 serverStatus
             }
         }
@@ -136,7 +136,7 @@ internal object MobileAgentRuntime {
             id = taskId,
             title = title,
             status = "queued",
-            detail = "任务已创建，等待执行",
+            detail = "任务已创建，等待执行。",
             createdAt = now,
             updatedAt = now,
         )
@@ -144,7 +144,7 @@ internal object MobileAgentRuntime {
 
         scope.launch {
             updateTask(taskId) { task ->
-                task.copy(status = "running", detail = "正在申请 root 权限并切换飞行模式", updatedAt = System.currentTimeMillis())
+                task.copy(status = "running", detail = "正在申请 Root 权限并切换飞行模式。", updatedAt = System.currentTimeMillis())
             }
 
             val result = controller.rotateIp(holdSeconds)
@@ -154,8 +154,8 @@ internal object MobileAgentRuntime {
             latestDiagnostics = debugLines
             latestError = if (result.success) null else result.message
             val detail = when {
-                result.success && result.oldIpv6.isNullOrBlank() -> "已获取新的 IPv6：${result.newIpv6}"
-                result.success && result.ipChanged -> "IPv6 已从 ${result.oldIpv6} 切换到 ${result.newIpv6}"
+                result.success && result.oldIpv6.isNullOrBlank() -> "已获取新的 IPv6 地址：${result.newIpv6}"
+                result.success && result.ipChanged -> "IPv6 已从 ${result.oldIpv6} 切换为 ${result.newIpv6}"
                 else -> result.message
             }
             updateTask(taskId) { task ->
@@ -213,7 +213,7 @@ internal object MobileAgentRuntime {
                     session.method == Method.POST && session.uri == "/api/network/rotate" -> {
                         val body = parseJsonBody(session)
                         val holdSeconds = body?.optInt("holdSeconds")?.takeIf { it > 0 } ?: 10
-                        val title = body?.optString("title")?.takeIf { it.isNotBlank() } ?: "API 更换出口 IP"
+                        val title = body?.optString("title")?.takeIf { it.isNotBlank() } ?: "API 切换出口 IP"
                         val task = submitRotateTask(holdSeconds = holdSeconds, title = title)
                         jsonResponse(
                             JSONObject()
@@ -237,7 +237,7 @@ internal object MobileAgentRuntime {
                         val task = getTask(taskId)
                         if (task == null) {
                             jsonResponse(
-                                JSONObject().put("ok", false).put("error", "任务不存在"),
+                                JSONObject().put("ok", false).put("error", "任务不存在。"),
                                 status = Response.Status.NOT_FOUND,
                             )
                         } else {
@@ -248,7 +248,7 @@ internal object MobileAgentRuntime {
                     else -> jsonResponse(
                         JSONObject()
                             .put("ok", false)
-                            .put("error", "未找到接口")
+                            .put("error", "接口不存在。")
                             .put("available", JSONArray(listOf(
                                 "GET /api/health",
                                 "GET /api/network/status",
@@ -260,7 +260,7 @@ internal object MobileAgentRuntime {
                     )
                 }
             } catch (t: Throwable) {
-                latestError = t.message ?: "本地 API 异常"
+                latestError = t.message ?: "本地 API 错误。"
                 jsonResponse(
                     JSONObject().put("ok", false).put("error", latestError),
                     status = Response.Status.INTERNAL_ERROR,

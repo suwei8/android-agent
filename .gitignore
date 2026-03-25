@@ -2,6 +2,9 @@
 .gradle-user/
 .idea/
 local.properties
+.env
+.env.*
+!.env.example
 
 **/build/
 captures/

@@ -18,13 +18,14 @@ What already exists:
 - root command execution for network inspection and airplane-mode based IP rotation
 - bundled `cloudflared` download and install logic for Android
 - a fallback tunnel runner that can switch to a Termux-installed `cloudflared` when the bundled binary fails on device DNS resolution
+- tunnel runtime cleanup now targets ARM Android devices only for bundled `cloudflared` downloads (`arm64-v8a` and `armeabi-v7a`)
 
 What is not complete yet:
 
-- no end-to-end validation on an emulator
+- no full end-to-end validation on a rooted physical phone after the latest tunnel refactor
 - no stable background service / boot-start implementation
 - no real SOCKS5 / HTTP proxy node backend yet; the "nodes" area is still mostly UI scaffolding
-- no CI, automated tests, or release pipeline
+- GitHub Actions now owns APK compilation and GitHub Releases publishing, but there are still no automated tests
 
 ## Repository Layout
 
@@ -57,33 +58,42 @@ Implemented endpoints:
 
 Recommended next environment:
 
-- Linux ARM64 development server
-- Android Studio or command-line Android SDK
-- an Android emulator for UI and API smoke tests
+- Linux ARM64 development server for source editing and Redroid-based local validation
+- GitHub Actions on `ubuntu-latest` for all APK compilation and release publishing
+- OCI ARM host with Redroid for local UI and API smoke tests
 - a rooted real device for final validation of root-only workflows
 
 Important limitation:
 
-- emulator work can validate UI, local API, and basic tunnel process management
-- emulator work cannot fully validate the real rooted-phone workflow, carrier IPv6 behavior, or airplane-mode based IP rotation on production hardware
+- the current ARM64 server is not a supported host for the official Android Linux build-tools path used by Gradle resource compilation
+- do not treat local `assembleDebug` failures on this ARM64 host as application-code failures
+- use GitHub Actions as the canonical build path, then install the produced APK into Redroid for fast local validation
+- use a rooted real device for final confirmation of root-only workflows such as airplane-mode based IP rotation
 
-## Build
+## Build And Release
 
-Expected toolchain:
+Canonical build path:
 
-- JDK 17
-- Android SDK Platform 35
-- Gradle 8.7 compatible environment
+- push commits to GitHub to trigger CI artifact builds
+- create and push a tag such as `v1.0.0` to publish an APK to GitHub Releases
+- or run the `Android Build` workflow manually with `publish_release=true` and a `release_tag`
 
-Typical commands:
+Release output location:
 
-```bash
-./gradlew assembleDebug
-./gradlew installDebug
-```
+- `https://github.com/suwei8/android-agent/releases`
+
+Workflow details:
+
+- CI workflow file: `.github/workflows/android-build.yml`
+- artifact name: `android-apk`
+- release asset name: `mobile-agent-debug.apk`
+- checksum asset: `mobile-agent-debug.apk.sha256`
+
+For step-by-step release usage, see:
+
+- `docs/BUILD_RELEASE.md`
 
 ## Known Risks
 
-- several UI strings in the current source appear to contain mojibake from prior editing and should be normalized
-- `TunnelRuntime.kt` currently contains a legacy block that was commented out during an in-progress refactor; functional logic is in the later active implementation
-- the latest tunnel fallback refactor was prepared for validation but was not fully rebuilt and re-tested before handoff
+- the latest `TunnelRuntime.kt` refactor still needs device-side validation even after the legacy block cleanup
+- the GitHub Actions pipeline builds on x86_64 runners, so local ARM64 toolchain issues may not reproduce there
