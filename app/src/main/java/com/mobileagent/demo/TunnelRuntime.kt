@@ -233,6 +233,7 @@ internal object TunnelRuntime {
             token.isBlank() -> null
             !selection.ready -> null
             running && logHealth.connected -> null
+            !running && logHealth.gracefulStop -> null
             lastErrorOverride != null -> lastErrorOverride
             logHealth.blockingError != null -> logHealth.blockingError
             !running && tunnelLogs.isNotEmpty() -> tunnelLogs.last()
@@ -248,6 +249,7 @@ internal object TunnelRuntime {
                 !selection.ready -> "缺少可执行文件"
                 running && logHealth.connected -> "已连接"
                 running -> "启动中"
+                !running && logHealth.gracefulStop -> "已停止"
                 computedError != null -> "已停止（有错误）"
                 else -> "已停止"
             },
@@ -537,17 +539,25 @@ internal object TunnelRuntime {
     private fun analyzeTunnelLogs(lines: List<String>): TunnelLogHealth {
         var connected = false
         var blockingError: String? = null
+        var gracefulStop = false
         lines.forEach { line ->
             val normalized = line.lowercase()
             if (line.contains("Registered tunnel connection", ignoreCase = true)) {
                 connected = true
+            }
+            if (
+                normalized.contains("initiating graceful shutdown") ||
+                normalized.contains("tunnel server stopped") ||
+                normalized.contains("metrics server stopped")
+            ) {
+                gracefulStop = true
+                return@forEach
             }
             if (normalized.contains("failed to fetch features")) {
                 return@forEach
             }
             if (
                 normalized.contains("could not lookup srv records") ||
-                normalized.contains("tunnel server stopped") ||
                 normalized.contains("unable to establish connection with cloudflare edge") ||
                 normalized.contains("failed to serve tunnel connection") ||
                 normalized.contains("serve tunnel error") ||
@@ -559,6 +569,7 @@ internal object TunnelRuntime {
         return TunnelLogHealth(
             connected = connected,
             blockingError = blockingError,
+            gracefulStop = gracefulStop,
         )
     }
 
@@ -729,4 +740,5 @@ private data class TunnelBinarySelection(
 private data class TunnelLogHealth(
     val connected: Boolean,
     val blockingError: String?,
+    val gracefulStop: Boolean,
 )
