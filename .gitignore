@@ -1,0 +1,15 @@
+.gradle/
+.gradle-user/
+.idea/
+local.properties
+
+**/build/
+captures/
+*.iml
+
+tools/
+build-output.log
+build-exit.txt
+history_*.md
+mobile_agent_*.png
+mobile_agent_*.xml
