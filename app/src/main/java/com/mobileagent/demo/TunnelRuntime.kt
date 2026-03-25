@@ -35,9 +35,13 @@ internal object TunnelRuntime {
     private const val keyDomain = "cloudflared_domain"
     private const val keyBinarySource = "cloudflared_binary_source"
 
+    private const val binarySourceApp = "app"
     private const val binarySourceDownloaded = "downloaded"
     private const val binarySourceTermux = "termux"
 
+    private const val appBinaryDefaultPath = "/data/user/0/com.mobileagent.demo/files/cloudflared"
+    private const val appLogDefaultPath = "/data/user/0/com.mobileagent.demo/files/mobile-agent-cloudflared.log"
+    private const val appPidDefaultPath = "/data/user/0/com.mobileagent.demo/files/mobile-agent-cloudflared.pid"
     private const val downloadedBinaryPath = "/data/local/tmp/cloudflared"
     private const val downloadedLogPath = "/data/local/tmp/mobile-agent-cloudflared.log"
     private const val downloadedPidPath = "/data/local/tmp/mobile-agent-cloudflared.pid"
@@ -64,7 +68,7 @@ internal object TunnelRuntime {
         running = false,
         statusLabel = "未绑定",
         domain = "未配置",
-        binaryPath = downloadedBinaryPath,
+        binaryPath = appBinaryDefaultPath,
         binaryReady = false,
         binaryVersion = null,
         downloadStatus = "未下载",
@@ -78,6 +82,12 @@ internal object TunnelRuntime {
 
     fun getSavedDomain(context: Context): String = prefs(context).getString(keyDomain, "").orEmpty()
 
+    private fun appBinaryFile(context: Context): File = File(context.applicationContext.filesDir, "cloudflared")
+
+    private fun appLogFile(context: Context): File = File(context.applicationContext.filesDir, "mobile-agent-cloudflared.log")
+
+    private fun appPidFile(context: Context): File = File(context.applicationContext.filesDir, "mobile-agent-cloudflared.pid")
+
     suspend fun bind(context: Context, token: String, domain: String): TunnelStatusSnapshot = withContext(Dispatchers.IO) {
         prefs(context)
             .edit()
@@ -88,8 +98,8 @@ internal object TunnelRuntime {
     }
 
     suspend fun downloadBinary(context: Context, force: Boolean = false): TunnelStatusSnapshot = withContext(Dispatchers.IO) {
-        val downloaded = resolveSpecificBinarySelection(binarySourceDownloaded)
-        if (downloaded.ready && !force) {
+        val appSelection = resolveSpecificBinarySelection(context, binarySourceApp)
+        if (appSelection.ready && !force) {
             return@withContext refreshStatus(context, lastErrorOverride = null)
         }
 
@@ -108,16 +118,10 @@ internal object TunnelRuntime {
             val packageUrl = resolvePackageDownloadUrl(spec)
             downloadFile(packageUrl, tempPackage)
             extractCloudflaredBinary(tempPackage, extractedBinary)
-            val escapedSource = escapeForSingleQuotes(extractedBinary.absolutePath)
-            val installResult = runRootCommand(
-                "mkdir -p '/data/local/tmp' && cp '$escapedSource' '$downloadedBinaryPath' && chmod 755 '$downloadedBinaryPath' && ls -l '$downloadedBinaryPath'",
-                30_000,
-            )
-            if (installResult.exitCode == 0) {
-                null
-            } else {
-                installResult.stdout.trim().ifBlank { "安装内置 cloudflared 失败。" }
-            }
+            installBinaryForApp(context, extractedBinary)
+            installBinaryForRoot(extractedBinary)
+            saveBinarySource(context, binarySourceApp)
+            null
         } catch (t: Throwable) {
             t.message?.trim().orEmpty().ifBlank { "下载内置 cloudflared 失败。" }
         } finally {
@@ -132,7 +136,7 @@ internal object TunnelRuntime {
         context: Context,
         lastErrorOverride: String? = latestStatus.lastError,
     ): TunnelStatusSnapshot = withContext(Dispatchers.IO) {
-        val selection = resolveBinarySelection(getSavedBinarySource(context))
+        val selection = resolveBinarySelection(context, getSavedBinarySource(context))
         buildStatus(context, selection, lastErrorOverride)
     }
 
@@ -142,10 +146,12 @@ internal object TunnelRuntime {
             return@withContext refreshStatus(context, lastErrorOverride = "请先绑定 Tunnel Token。")
         }
 
-        var selection = resolveBinarySelection(getSavedBinarySource(context))
-        if (!selection.ready && selection.id == binarySourceDownloaded) {
+        var selection = resolveBinarySelection(context, getSavedBinarySource(context))
+        val appSelection = resolveSpecificBinarySelection(context, binarySourceApp)
+        val downloadedSelection = resolveSpecificBinarySelection(context, binarySourceDownloaded)
+        if (!selection.ready && !appSelection.ready && !downloadedSelection.ready) {
             downloadBinary(context, force = false)
-            selection = resolveBinarySelection(getSavedBinarySource(context))
+            selection = resolveBinarySelection(context, getSavedBinarySource(context))
         }
         if (!selection.ready) {
             return@withContext buildStatus(context, selection, "当前没有可运行的 cloudflared 二进制文件。")
@@ -156,7 +162,7 @@ internal object TunnelRuntime {
         var status = waitForStableStatus(context, selection, startResult.stdout.trim().ifBlank { null })
 
         if (shouldFallbackToTermux(status) && selection.id != binarySourceTermux) {
-            val termuxSelection = resolveSpecificBinarySelection(binarySourceTermux)
+            val termuxSelection = resolveSpecificBinarySelection(context, binarySourceTermux)
             if (termuxSelection.ready) {
                 stopInternal()
                 startResult = startSelection(termuxSelection, token)
@@ -201,9 +207,17 @@ internal object TunnelRuntime {
             ?.lineSequence()
             ?.map { it.trim() }
             ?.firstOrNull { it.isNotBlank() }
-        val pidResult = runRootCommand("pidof cloudflared", 10_000)
+        val pidResult = runSelectionCommand(
+            selection,
+            "if [ -f '${selection.pidPath}' ]; then pid=\$(cat '${selection.pidPath}'); kill -0 \"\$pid\" 2>/dev/null && echo \"\$pid\"; fi",
+            10_000,
+        )
         val running = pidResult.exitCode == 0 && pidResult.stdout.trim().isNotBlank()
-        val tailResult = runRootCommand("if [ -f '${selection.logPath}' ]; then tail -n $logLineLimit '${selection.logPath}'; fi", 10_000)
+        val tailResult = runSelectionCommand(
+            selection,
+            "if [ -f '${selection.logPath}' ]; then tail -n $logLineLimit '${selection.logPath}'; fi",
+            10_000,
+        )
         val tunnelLogs = tailResult.stdout
             .lineSequence()
             .map { it.trim() }
@@ -211,8 +225,9 @@ internal object TunnelRuntime {
             .toList()
             .takeLast(logLineLimit)
         val logHealth = analyzeTunnelLogs(tunnelLogs)
-        val bundledReady = resolveSpecificBinarySelection(binarySourceDownloaded).ready
-        val termuxReady = resolveSpecificBinarySelection(binarySourceTermux).ready
+        val appReady = resolveSpecificBinarySelection(context, binarySourceApp).ready
+        val bundledReady = resolveSpecificBinarySelection(context, binarySourceDownloaded).ready
+        val termuxReady = resolveSpecificBinarySelection(context, binarySourceTermux).ready
 
         val computedError = when {
             lastErrorOverride != null -> lastErrorOverride
@@ -240,7 +255,7 @@ internal object TunnelRuntime {
             binaryPath = selection.path,
             binaryReady = selection.ready,
             binaryVersion = binaryVersion,
-            downloadStatus = buildDownloadStatus(selection, bundledReady, termuxReady, spec),
+            downloadStatus = buildDownloadStatus(selection, appReady, bundledReady, termuxReady, spec),
             deviceAbi = spec.abiLabel,
             pid = pidResult.stdout.trim().ifBlank { null },
             logLines = buildList {
@@ -258,10 +273,12 @@ internal object TunnelRuntime {
 
     private fun buildDownloadStatus(
         selection: TunnelBinarySelection,
+        appReady: Boolean,
         bundledReady: Boolean,
         termuxReady: Boolean,
         spec: CloudflaredDownloadSpec,
     ): String {
+        val appStatus = if (appReady) "应用私有目录已就绪" else "应用私有目录未就绪"
         val bundledStatus = when {
             bundledReady -> "内置包已就绪"
             spec.downloadSupported -> "内置包可下载"
@@ -269,8 +286,9 @@ internal object TunnelRuntime {
         }
         val termuxStatus = if (termuxReady) "Termux 可用" else "Termux 不可用"
         return when (selection.id) {
+            binarySourceApp -> "当前使用应用私有二进制（$appStatus，$bundledStatus，$termuxStatus）"
             binarySourceTermux -> "当前使用 Termux 回退方案（$bundledStatus，$termuxStatus）"
-            else -> "当前使用内置二进制（$bundledStatus，$termuxStatus）"
+            else -> "当前使用内置二进制（$appStatus，$bundledStatus，$termuxStatus）"
         }
     }
 
@@ -305,6 +323,9 @@ internal object TunnelRuntime {
     }
 
     private fun startSelection(selection: TunnelBinarySelection, token: String): TunnelShellResult {
+        if (selection.launchMode == TunnelLaunchMode.APP) {
+            return startAppProcess(selection, token)
+        }
         val escapedBinaryPath = escapeForSingleQuotes(selection.path)
         val escapedToken = escapeForSingleQuotes(token)
         val startCommand = when (selection.id) {
@@ -315,6 +336,10 @@ internal object TunnelRuntime {
     }
 
     private fun stopInternal() {
+        runAppCommand(
+            "if [ -f '$appPidDefaultPath' ]; then kill \$(cat '$appPidDefaultPath') 2>/dev/null; rm -f '$appPidDefaultPath'; fi",
+            10_000,
+        )
         runRootCommand(
             "if [ -f '$downloadedPidPath' ]; then kill \$(cat '$downloadedPidPath') 2>/dev/null; rm -f '$downloadedPidPath'; fi; " +
                 "if [ -f '$termuxPidPath' ]; then kill \$(cat '$termuxPidPath') 2>/dev/null; rm -f '$termuxPidPath'; fi; " +
@@ -326,36 +351,41 @@ internal object TunnelRuntime {
     private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
 
     private fun getSavedBinarySource(context: Context): String {
-        return prefs(context).getString(keyBinarySource, binarySourceDownloaded).orEmpty().ifBlank { binarySourceDownloaded }
+        return prefs(context).getString(keyBinarySource, binarySourceApp).orEmpty().ifBlank { binarySourceApp }
     }
 
     private fun saveBinarySource(context: Context, sourceId: String) {
         prefs(context).edit().putString(keyBinarySource, sourceId).apply()
     }
 
-    private fun resolveBinarySelection(preferredSource: String): TunnelBinarySelection {
-        val selections = buildBinarySelections()
+    private fun resolveBinarySelection(context: Context, preferredSource: String): TunnelBinarySelection {
+        val selections = buildBinarySelections(context)
         return selections.firstOrNull { it.id == preferredSource && it.ready }
+            ?: selections.firstOrNull { it.id == binarySourceApp && it.ready }
             ?: selections.firstOrNull { it.id == binarySourceDownloaded && it.ready }
             ?: selections.firstOrNull { it.id == binarySourceTermux && it.ready }
             ?: selections.firstOrNull { it.id == preferredSource }
             ?: selections.first()
     }
 
-    private fun resolveSpecificBinarySelection(sourceId: String): TunnelBinarySelection {
-        return buildBinarySelections().firstOrNull { it.id == sourceId }
+    private fun resolveSpecificBinarySelection(context: Context, sourceId: String): TunnelBinarySelection {
+        return buildBinarySelections(context).firstOrNull { it.id == sourceId }
             ?: TunnelBinarySelection(
                 id = sourceId,
-                path = downloadedBinaryPath,
+                path = appBinaryFile(context).absolutePath,
                 ready = false,
                 sourceLabel = "未知来源",
-                logPath = downloadedLogPath,
-                pidPath = downloadedPidPath,
-                launchMode = TunnelLaunchMode.ROOT,
+                logPath = appLogFile(context).absolutePath,
+                pidPath = appPidFile(context).absolutePath,
+                launchMode = TunnelLaunchMode.APP,
             )
     }
 
-    private fun buildBinarySelections(): List<TunnelBinarySelection> {
+    private fun buildBinarySelections(context: Context): List<TunnelBinarySelection> {
+        val appBinary = appBinaryFile(context)
+        val appLog = appLogFile(context)
+        val appPid = appPidFile(context)
+        val appReady = appBinary.exists() && appBinary.canExecute()
         val downloadedReady = runRootCommand("if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi", 10_000)
             .stdout
             .contains("ready")
@@ -364,10 +394,19 @@ internal object TunnelRuntime {
             .contains("ready")
         return listOf(
             TunnelBinarySelection(
+                id = binarySourceApp,
+                path = appBinary.absolutePath,
+                ready = appReady,
+                sourceLabel = "应用私有二进制",
+                logPath = appLog.absolutePath,
+                pidPath = appPid.absolutePath,
+                launchMode = TunnelLaunchMode.APP,
+            ),
+            TunnelBinarySelection(
                 id = binarySourceDownloaded,
                 path = downloadedBinaryPath,
                 ready = downloadedReady,
-                sourceLabel = "内置 Android 二进制",
+                sourceLabel = "内置 Android 二进制（root）",
                 logPath = downloadedLogPath,
                 pidPath = downloadedPidPath,
                 launchMode = TunnelLaunchMode.ROOT,
@@ -565,15 +604,63 @@ internal object TunnelRuntime {
 
     private fun escapeForSingleQuotes(value: String): String = value.replace("'", "'\"'\"'")
 
+    private fun installBinaryForApp(context: Context, extractedBinary: File) {
+        val target = appBinaryFile(context)
+        target.parentFile?.mkdirs()
+        extractedBinary.copyTo(target, overwrite = true)
+        if (!target.setExecutable(true, false)) {
+            throw IllegalStateException("无法为应用私有 cloudflared 设置可执行权限。")
+        }
+    }
+
+    private fun installBinaryForRoot(extractedBinary: File) {
+        val escapedSource = escapeForSingleQuotes(extractedBinary.absolutePath)
+        runRootCommand(
+            "mkdir -p '/data/local/tmp' && cp '$escapedSource' '$downloadedBinaryPath' && chmod 755 '$downloadedBinaryPath'",
+            30_000,
+        )
+    }
+
+    private fun startAppProcess(selection: TunnelBinarySelection, token: String): TunnelShellResult {
+        return try {
+            val logFile = File(selection.logPath)
+            val pidFile = File(selection.pidPath)
+            logFile.parentFile?.mkdirs()
+            pidFile.parentFile?.mkdirs()
+            logFile.delete()
+            pidFile.delete()
+            val process = ProcessBuilder(
+                selection.path,
+                "tunnel",
+                "--no-autoupdate",
+                "run",
+                "--token",
+                token,
+            )
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+                .start()
+            pidFile.writeText(process.pid().toString())
+            TunnelShellResult(executable = selection.path, exitCode = 0, stdout = process.pid().toString())
+        } catch (t: Throwable) {
+            TunnelShellResult(executable = selection.path, exitCode = -1, stdout = t.message.orEmpty())
+        }
+    }
+
     private fun runSelectionCommand(
         selection: TunnelBinarySelection,
         command: String,
         timeoutMs: Long,
     ): TunnelShellResult {
         return when (selection.launchMode) {
+            TunnelLaunchMode.APP -> runAppCommand(command, timeoutMs)
             TunnelLaunchMode.TERMUX -> runTermuxCommand(command, timeoutMs)
             TunnelLaunchMode.ROOT -> runRootCommand(command, timeoutMs)
         }
+    }
+
+    private fun runAppCommand(command: String, timeoutMs: Long): TunnelShellResult {
+        return runCommand(listOf("sh", "-c", command), timeoutMs)
     }
 
     private fun runTermuxCommand(command: String, timeoutMs: Long): TunnelShellResult {
@@ -604,7 +691,8 @@ internal object TunnelRuntime {
             val result = runCommand(listOf(executable) + arguments, timeoutMs)
             lastResult = result
             val missingBinary = result.exitCode == -1 && result.stdout.contains("No such file", ignoreCase = true)
-            if (!missingBinary) {
+            val permissionDenied = result.exitCode == -1 && result.stdout.contains("Permission denied", ignoreCase = true)
+            if (!missingBinary && !permissionDenied) {
                 return result
             }
         }
@@ -635,6 +723,7 @@ internal object TunnelRuntime {
 }
 
 private enum class TunnelLaunchMode {
+    APP,
     ROOT,
     TERMUX,
 }
