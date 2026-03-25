@@ -230,10 +230,10 @@ internal object TunnelRuntime {
         val termuxReady = resolveSpecificBinarySelection(context, binarySourceTermux).ready
 
         val computedError = when {
-            lastErrorOverride != null -> lastErrorOverride
             token.isBlank() -> null
             !selection.ready -> null
             running && logHealth.connected -> null
+            lastErrorOverride != null -> lastErrorOverride
             logHealth.blockingError != null -> logHealth.blockingError
             !running && tunnelLogs.isNotEmpty() -> tunnelLogs.last()
             versionCheck != null && versionCheck.exitCode != 0 -> versionCheck.stdout.trim().ifBlank { "cloudflared 无法执行。" }
