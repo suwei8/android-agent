@@ -25,6 +25,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".TunnelStatusRefreshReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.mobileagent.demo.DEBUG_REFRESH_TUNNEL_STATUS" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>
