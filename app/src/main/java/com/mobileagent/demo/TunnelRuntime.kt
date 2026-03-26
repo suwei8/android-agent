@@ -782,7 +782,7 @@ internal object TunnelRuntime {
                     stdout = "无法为 Termux wrapper 设置可执行权限。",
                 )
             }
-            runRootCommand("sh '$termuxWrapperPath'", timeoutMs)
+            runAppCommand("su -c sh '$termuxWrapperPath'", timeoutMs)
         } catch (t: Throwable) {
             TunnelShellResult(
                 executable = "sh",
