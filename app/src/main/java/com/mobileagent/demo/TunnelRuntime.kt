@@ -104,6 +104,28 @@ internal object TunnelRuntime {
             return@withContext refreshStatus(context, lastErrorOverride = null)
         }
 
+        val rootProbe = probeRootAccess()
+        val termuxInstalled = isPackageInstalled(context, termuxPackageName)
+        val existingAppProbe = probeAppBinary(context)
+        if (
+            force &&
+            appBinaryFile(context).exists() &&
+            existingAppProbe.exitCode != 0 &&
+            !isRootAccessible(rootProbe)
+        ) {
+            val message = when {
+                isRootPermissionDenied(rootProbe) && termuxInstalled ->
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，且当前无法通过 Root 自动接管 Termux。你仍可在 Termux 中手动执行 cloudflared tunnel run --token <你的令牌>，或先在 Magisk 中允许本应用后重试。"
+                isRootPermissionDenied(rootProbe) ->
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，请先在 Magisk 中为本应用授予 Root 权限。"
+                termuxInstalled ->
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行。已检测到 Termux，但当前 Root 不可用，应用无法自动接管；你仍可在 Termux 中手动执行 cloudflared tunnel run --token <你的令牌>。"
+                else ->
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，且当前 Root 不可用。"
+            }
+            return@withContext refreshStatus(context, lastErrorOverride = message)
+        }
+
         val spec = resolveDownloadSpec()
         if (!spec.downloadSupported) {
             return@withContext refreshStatus(
@@ -121,7 +143,6 @@ internal object TunnelRuntime {
             extractCloudflaredBinary(tempPackage, extractedBinary)
             installBinaryForApp(context, extractedBinary)
             val appUsable = probeAppBinary(context).exitCode == 0
-            val rootProbe = probeRootAccess()
             val rootInstallError = if (isRootAccessible(rootProbe)) {
                 try {
                     installBinaryForRoot(extractedBinary)
@@ -141,6 +162,9 @@ internal object TunnelRuntime {
                 rootInstallError == null && resolveSpecificBinarySelection(context, binarySourceDownloaded).ready -> {
                     saveBinarySource(context, binarySourceDownloaded)
                     null
+                }
+                !isRootAccessible(rootProbe) && termuxInstalled -> {
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行。已检测到 Termux，但当前 Root 不可用，应用无法自动接管；你仍可在 Termux 中手动执行 cloudflared tunnel run --token <你的令牌>。"
                 }
                 isRootPermissionDenied(rootProbe) -> {
                     "应用私有目录中的 cloudflared 在当前真机环境不可执行，请先在 Magisk 中为本应用授予 Root 权限。"
@@ -253,6 +277,9 @@ internal object TunnelRuntime {
         val logHealth = analyzeTunnelLogs(tunnelLogs)
         val appReady = resolveSpecificBinarySelection(context, binarySourceApp).ready
         val bundledReady = resolveSpecificBinarySelection(context, binarySourceDownloaded).ready
+        val rootProbe = probeRootAccess()
+        val rootAccessible = isRootAccessible(rootProbe)
+        val termuxInstalled = isPackageInstalled(context, termuxPackageName)
         val termuxReady = resolveSpecificBinarySelection(context, binarySourceTermux).ready
 
         val computedError = when {
@@ -283,7 +310,7 @@ internal object TunnelRuntime {
             binaryPath = selection.path,
             binaryReady = selection.ready,
             binaryVersion = binaryVersion,
-            downloadStatus = buildDownloadStatus(selection, appReady, bundledReady, termuxReady, spec),
+            downloadStatus = buildDownloadStatus(selection, appReady, bundledReady, termuxReady, termuxInstalled, rootAccessible, spec),
             deviceAbi = spec.abiLabel,
             pid = pidResult.stdout.trim().ifBlank { null },
             logLines = buildList {
@@ -304,6 +331,8 @@ internal object TunnelRuntime {
         appReady: Boolean,
         bundledReady: Boolean,
         termuxReady: Boolean,
+        termuxInstalled: Boolean,
+        rootAccessible: Boolean,
         spec: CloudflaredDownloadSpec,
     ): String {
         val appStatus = if (appReady) "应用私有目录已就绪" else "应用私有目录未就绪"
@@ -312,7 +341,12 @@ internal object TunnelRuntime {
             spec.downloadSupported -> "内置包可下载"
             else -> "内置包不支持"
         }
-        val termuxStatus = if (termuxReady) "Termux 可用" else "Termux 不可用"
+        val termuxStatus = when {
+            termuxReady -> "Termux 已就绪"
+            termuxInstalled && rootAccessible -> "Termux 已安装，但未检测到可接管的 cloudflared"
+            termuxInstalled -> "Termux 已安装，但当前自动接管需要 Root"
+            else -> "Termux 未安装"
+        }
         return when (selection.id) {
             binarySourceApp -> "当前使用应用私有二进制（$appStatus，$bundledStatus，$termuxStatus）"
             binarySourceTermux -> "当前使用 Termux 回退方案（$bundledStatus，$termuxStatus）"
@@ -414,13 +448,16 @@ internal object TunnelRuntime {
         val appReady = appBinary.exists() && appBinary.canExecute() && probeAppBinary(context).exitCode == 0
         val rootProbe = probeRootAccess()
         val rootAccessible = isRootAccessible(rootProbe)
+        val termuxInstalled = isPackageInstalled(context, termuxPackageName)
         val downloadedExists = runAppCommand("if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi", 10_000)
             .stdout
             .contains("ready")
         val downloadedReady = rootAccessible && downloadedExists
-        val termuxReady = runTermuxCommand("test -x '$termuxBinaryPath' && echo ready", 10_000)
-            .stdout
-            .contains("ready")
+        val termuxReady = termuxInstalled &&
+            rootAccessible &&
+            runTermuxCommand("test -x '$termuxBinaryPath' && echo ready", 10_000)
+                .stdout
+                .contains("ready")
         return listOf(
             TunnelBinarySelection(
                 id = binarySourceApp,
@@ -506,6 +543,15 @@ internal object TunnelRuntime {
             ?.substringAfter(':')
             ?.trim()
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun isPackageInstalled(context: Context, packageName: String): Boolean {
+        return try {
+            context.packageManager.getPackageInfo(packageName, 0)
+            true
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     private fun extractCloudflaredBinary(packageFile: File, destination: File) {
