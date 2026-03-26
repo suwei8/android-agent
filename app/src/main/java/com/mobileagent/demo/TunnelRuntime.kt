@@ -49,6 +49,8 @@ internal object TunnelRuntime {
     private const val termuxPackageName = "com.termux"
     private const val termuxPrefix = "/data/data/com.termux/files/usr"
     private const val termuxHome = "/data/data/com.termux/files/home"
+    private const val termuxTmp = "$termuxPrefix/tmp"
+    private const val termuxLibPath = "$termuxPrefix/lib"
     private const val termuxBinaryPath = "$termuxPrefix/bin/cloudflared"
     private const val termuxLogPath = "$termuxHome/.mobile-agent-cloudflared.log"
     private const val termuxPidPath = "$termuxHome/.mobile-agent-cloudflared.pid"
@@ -758,13 +760,17 @@ internal object TunnelRuntime {
     }
 
     private fun runTermuxCommand(command: String, timeoutMs: Long): TunnelShellResult {
-        val fullCommand =
+        return runRootCommand(buildTermuxEnvironmentCommand(command), timeoutMs)
+    }
+
+    private fun buildTermuxEnvironmentCommand(command: String): String {
+        return "mkdir -p '$termuxTmp'; " +
             "export PREFIX='$termuxPrefix'; " +
-                "export HOME='$termuxHome'; " +
-                "export PATH='$termuxPrefix/bin:$termuxPrefix/bin/applets':\$PATH; " +
-                command
-        val wrapped = "run-as $termuxPackageName sh -c '${escapeForSingleQuotes(fullCommand)}'"
-        return runRootCommand(wrapped, timeoutMs)
+            "export HOME='$termuxHome'; " +
+            "export TMPDIR='$termuxTmp'; " +
+            "export PATH='$termuxPrefix/bin:$termuxPrefix/bin/applets':\$PATH; " +
+            "export LD_LIBRARY_PATH='$termuxLibPath'; " +
+            command
     }
 
     private fun runRootCommand(command: String, timeoutMs: Long): TunnelShellResult {
