@@ -114,6 +114,10 @@ internal object TunnelRuntime {
             !isRootAccessible(rootProbe)
         ) {
             val message = when {
+                isRootDaemonUnavailable(rootProbe) && termuxInstalled ->
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，且 Magisk 服务当前未运行，应用无法自动接管 Termux。你仍可在 Termux 中手动执行 cloudflared tunnel run --token <你的令牌>，或先恢复 Magisk 服务后重试。"
+                isRootDaemonUnavailable(rootProbe) ->
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，且 Magisk 服务当前未运行。请先恢复设备上的 Magisk 服务后重试。"
                 isRootPermissionDenied(rootProbe) && termuxInstalled ->
                     "应用私有目录中的 cloudflared 在当前真机环境不可执行，且当前无法通过 Root 自动接管 Termux。你仍可在 Termux 中手动执行 cloudflared tunnel run --token <你的令牌>，或先在 Magisk 中允许本应用后重试。"
                 isRootPermissionDenied(rootProbe) ->
@@ -162,6 +166,12 @@ internal object TunnelRuntime {
                 rootInstallError == null && resolveSpecificBinarySelection(context, binarySourceDownloaded).ready -> {
                     saveBinarySource(context, binarySourceDownloaded)
                     null
+                }
+                isRootDaemonUnavailable(rootProbe) && termuxInstalled -> {
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，且 Magisk 服务当前未运行，应用无法自动接管 Termux。你仍可在 Termux 中手动执行 cloudflared tunnel run --token <你的令牌>，或先恢复 Magisk 服务后重试。"
+                }
+                isRootDaemonUnavailable(rootProbe) -> {
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，且 Magisk 服务当前未运行。请先恢复设备上的 Magisk 服务后重试。"
                 }
                 !isRootAccessible(rootProbe) && termuxInstalled -> {
                     "应用私有目录中的 cloudflared 在当前真机环境不可执行。已检测到 Termux，但当前 Root 不可用，应用无法自动接管；你仍可在 Termux 中手动执行 cloudflared tunnel run --token <你的令牌>。"
@@ -279,6 +289,7 @@ internal object TunnelRuntime {
         val bundledReady = resolveSpecificBinarySelection(context, binarySourceDownloaded).ready
         val rootProbe = probeRootAccess()
         val rootAccessible = isRootAccessible(rootProbe)
+        val rootDaemonUnavailable = isRootDaemonUnavailable(rootProbe)
         val termuxInstalled = isPackageInstalled(context, termuxPackageName)
         val termuxReady = resolveSpecificBinarySelection(context, binarySourceTermux).ready
 
@@ -310,7 +321,7 @@ internal object TunnelRuntime {
             binaryPath = selection.path,
             binaryReady = selection.ready,
             binaryVersion = binaryVersion,
-            downloadStatus = buildDownloadStatus(selection, appReady, bundledReady, termuxReady, termuxInstalled, rootAccessible, spec),
+            downloadStatus = buildDownloadStatus(selection, appReady, bundledReady, termuxReady, termuxInstalled, rootAccessible, rootDaemonUnavailable, spec),
             deviceAbi = spec.abiLabel,
             pid = pidResult.stdout.trim().ifBlank { null },
             logLines = buildList {
@@ -333,6 +344,7 @@ internal object TunnelRuntime {
         termuxReady: Boolean,
         termuxInstalled: Boolean,
         rootAccessible: Boolean,
+        rootDaemonUnavailable: Boolean,
         spec: CloudflaredDownloadSpec,
     ): String {
         val appStatus = if (appReady) "应用私有目录已就绪" else "应用私有目录未就绪"
@@ -343,6 +355,7 @@ internal object TunnelRuntime {
         }
         val termuxStatus = when {
             termuxReady -> "Termux 已就绪"
+            termuxInstalled && rootDaemonUnavailable -> "Termux 已安装，但 Magisk 服务未运行，无法自动接管"
             termuxInstalled && rootAccessible -> "Termux 已安装，但未检测到可接管的 cloudflared"
             termuxInstalled -> "Termux 已安装，但当前自动接管需要 Root"
             else -> "Termux 未安装"
@@ -722,6 +735,10 @@ internal object TunnelRuntime {
 
     private fun isRootPermissionDenied(result: TunnelShellResult): Boolean {
         return !isRootAccessible(result) && result.stdout.contains("Permission denied", ignoreCase = true)
+    }
+
+    private fun isRootDaemonUnavailable(result: TunnelShellResult): Boolean {
+        return !isRootAccessible(result) && result.stdout.contains("No daemon is currently running", ignoreCase = true)
     }
 
     private fun runSelectionCommand(

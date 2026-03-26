@@ -45,12 +45,20 @@ internal class RootNetworkController {
         val rootCheck = runRootCommand("id", timeoutMs = 20_000)
         debugLog += summarizeCommand("Root 检查", rootCheck)
         if (rootCheck.exitCode != 0 || !rootCheck.stdout.contains("uid=0")) {
+            val message = when {
+                rootCheck.stdout.contains("No daemon is currently running", ignoreCase = true) ->
+                    "Magisk 服务当前未运行，无法获取 Root。请先恢复设备上的 Magisk 服务后重试。"
+                rootCheck.stdout.contains("Permission denied", ignoreCase = true) ->
+                    "未获得 Root 权限。请在 Magisk 中允许此应用后重试。"
+                else ->
+                    "当前无法获取 Root。请先检查设备上的 Magisk 状态后重试。"
+            }
             return@withContext RotateResult(
                 success = false,
                 oldIpv6 = before.currentIpv6,
                 newIpv6 = before.currentIpv6,
                 ipChanged = false,
-                message = "未获得 Root 权限。请在 Magisk 中允许此应用后重试。",
+                message = message,
                 debugLog = debugLog,
             )
         }
