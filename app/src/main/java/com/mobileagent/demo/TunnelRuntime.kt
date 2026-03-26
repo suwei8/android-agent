@@ -859,35 +859,16 @@ internal object TunnelRuntime {
     }
 
     private fun runTermuxCommand(command: String, timeoutMs: Long): TunnelShellResult {
-        val script = buildString {
-            appendLine("#!/system/bin/sh")
-            appendLine("mkdir -p $termuxTmp")
-            appendLine("export PREFIX=$termuxPrefix")
-            appendLine("export HOME=$termuxHome")
-            appendLine("export TMPDIR=$termuxTmp")
-            appendLine("export PATH=$termuxPrefix/bin:$termuxPrefix/bin/applets:\$PATH")
-            appendLine("export LD_LIBRARY_PATH=$termuxLibPath")
-            appendLine(command)
+        val rootCommand = buildString {
+            append("mkdir -p '$termuxTmp'; ")
+            append("export PREFIX='$termuxPrefix'; ")
+            append("export HOME='$termuxHome'; ")
+            append("export TMPDIR='$termuxTmp'; ")
+            append("export PATH='$termuxPrefix/bin:$termuxPrefix/bin/applets':\$PATH; ")
+            append("export LD_LIBRARY_PATH='$termuxLibPath'; ")
+            append(command)
         }
-        return try {
-            val wrapperFile = File(termuxWrapperPath)
-            wrapperFile.parentFile?.mkdirs()
-            wrapperFile.writeText(script)
-            if (!wrapperFile.setExecutable(true, true)) {
-                return TunnelShellResult(
-                    executable = "sh",
-                    exitCode = -1,
-                    stdout = "无法为 Termux wrapper 设置可执行权限。",
-                )
-            }
-            runAppCommand("su -c sh '$termuxWrapperPath'", timeoutMs)
-        } catch (t: Throwable) {
-            TunnelShellResult(
-                executable = "sh",
-                exitCode = -1,
-                stdout = t.message.orEmpty(),
-            )
-        }
+        return runRootCommand(rootCommand, timeoutMs)
     }
 
     private fun runRootCommand(command: String, timeoutMs: Long): TunnelShellResult {
