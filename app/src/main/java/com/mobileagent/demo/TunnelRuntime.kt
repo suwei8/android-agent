@@ -61,6 +61,7 @@ internal object TunnelRuntime {
     private const val logLineLimit = 80
     private const val startupPollCount = 10
     private const val startupPollDelayMs = 2_000L
+    private const val tunnelDnsResolverArgs = "--dns-resolver-addrs 1.1.1.1:53 --dns-resolver-addrs 8.8.8.8:53"
 
     @Volatile
     private var latestStatus = TunnelStatusSnapshot(
@@ -119,9 +120,34 @@ internal object TunnelRuntime {
             downloadFile(packageUrl, tempPackage)
             extractCloudflaredBinary(tempPackage, extractedBinary)
             installBinaryForApp(context, extractedBinary)
-            installBinaryForRoot(extractedBinary)
-            saveBinarySource(context, binarySourceApp)
-            null
+            val appUsable = probeAppBinary(context).exitCode == 0
+            val rootProbe = probeRootAccess()
+            val rootInstallError = if (isRootAccessible(rootProbe)) {
+                try {
+                    installBinaryForRoot(extractedBinary)
+                    null
+                } catch (t: Throwable) {
+                    t.message?.trim().orEmpty().ifBlank { "安装 Root cloudflared 失败。" }
+                }
+            } else {
+                null
+            }
+
+            when {
+                appUsable -> {
+                    saveBinarySource(context, binarySourceApp)
+                    null
+                }
+                rootInstallError == null && resolveSpecificBinarySelection(context, binarySourceDownloaded).ready -> {
+                    saveBinarySource(context, binarySourceDownloaded)
+                    null
+                }
+                isRootPermissionDenied(rootProbe) -> {
+                    "应用私有目录中的 cloudflared 在当前真机环境不可执行，请先在 Magisk 中为本应用授予 Root 权限。"
+                }
+                rootInstallError != null -> rootInstallError
+                else -> "应用私有目录中的 cloudflared 在当前真机环境不可执行。"
+            }
         } catch (t: Throwable) {
             t.message?.trim().orEmpty().ifBlank { "下载内置 cloudflared 失败。" }
         } finally {
@@ -328,9 +354,9 @@ internal object TunnelRuntime {
         val escapedBinaryPath = escapeForSingleQuotes(selection.path)
         val escapedToken = escapeForSingleQuotes(token)
         val startCommand = when (selection.launchMode) {
-            TunnelLaunchMode.APP -> "chmod 700 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
-            TunnelLaunchMode.ROOT -> "chmod 755 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
-            TunnelLaunchMode.TERMUX -> "rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
+            TunnelLaunchMode.APP -> "chmod 700 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run $tunnelDnsResolverArgs --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
+            TunnelLaunchMode.ROOT -> "chmod 755 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run $tunnelDnsResolverArgs --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
+            TunnelLaunchMode.TERMUX -> "rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel run $tunnelDnsResolverArgs --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
         }
         return runSelectionCommand(selection, startCommand, 15_000)
     }
@@ -385,10 +411,13 @@ internal object TunnelRuntime {
         val appBinary = appBinaryFile(context)
         val appLog = appLogFile(context)
         val appPid = appPidFile(context)
-        val appReady = appBinary.exists() && appBinary.canExecute()
-        val downloadedReady = runRootCommand("if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi", 10_000)
+        val appReady = appBinary.exists() && appBinary.canExecute() && probeAppBinary(context).exitCode == 0
+        val rootProbe = probeRootAccess()
+        val rootAccessible = isRootAccessible(rootProbe)
+        val downloadedExists = runAppCommand("if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi", 10_000)
             .stdout
             .contains("ready")
+        val downloadedReady = rootAccessible && downloadedExists
         val termuxReady = runTermuxCommand("test -x '$termuxBinaryPath' && echo ready", 10_000)
             .stdout
             .contains("ready")
@@ -624,10 +653,29 @@ internal object TunnelRuntime {
 
     private fun installBinaryForRoot(extractedBinary: File) {
         val escapedSource = escapeForSingleQuotes(extractedBinary.absolutePath)
-        runRootCommand(
+        val result = runRootCommand(
             "mkdir -p '/data/local/tmp' && cp '$escapedSource' '$downloadedBinaryPath' && chmod 755 '$downloadedBinaryPath'",
             30_000,
         )
+        if (result.exitCode != 0) {
+            throw IllegalStateException(result.stdout.trim().ifBlank { "安装 Root cloudflared 失败。" })
+        }
+    }
+
+    private fun probeAppBinary(context: Context): TunnelShellResult {
+        val binaryPath = appBinaryFile(context).absolutePath
+        val escapedBinaryPath = escapeForSingleQuotes(binaryPath)
+        return runAppCommand("'$escapedBinaryPath' --version", 10_000)
+    }
+
+    private fun probeRootAccess(): TunnelShellResult = runRootCommand("id -u", 10_000)
+
+    private fun isRootAccessible(result: TunnelShellResult): Boolean {
+        return result.exitCode == 0 && result.stdout.lineSequence().any { it.trim() == "0" }
+    }
+
+    private fun isRootPermissionDenied(result: TunnelShellResult): Boolean {
+        return !isRootAccessible(result) && result.stdout.contains("Permission denied", ignoreCase = true)
     }
 
     private fun runSelectionCommand(
