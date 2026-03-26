@@ -462,7 +462,7 @@ internal object TunnelRuntime {
         val rootProbe = probeRootAccess()
         val rootAccessible = isRootAccessible(rootProbe)
         val termuxInstalled = isPackageInstalled(context, termuxPackageName)
-        val downloadedExists = runAppCommand("if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi", 10_000)
+        val downloadedExists = runRootCommand("if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi", 10_000)
             .stdout
             .contains("ready")
         val downloadedReady = rootAccessible && downloadedExists
