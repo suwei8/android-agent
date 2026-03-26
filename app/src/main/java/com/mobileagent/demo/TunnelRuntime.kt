@@ -8,6 +8,8 @@ import org.apache.commons.compress.archivers.ar.ArArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.File
 import java.net.HttpURLConnection
@@ -42,6 +44,7 @@ internal object TunnelRuntime {
     private const val appBinaryDefaultPath = "/data/user/0/com.mobileagent.demo/files/cloudflared"
     private const val appLogDefaultPath = "/data/user/0/com.mobileagent.demo/files/mobile-agent-cloudflared.log"
     private const val appPidDefaultPath = "/data/user/0/com.mobileagent.demo/files/mobile-agent-cloudflared.pid"
+    private const val appStatusDumpDefaultPath = "/data/user/0/com.mobileagent.demo/files/mobile-agent-tunnel-status.json"
     private const val downloadedBinaryPath = "/data/local/tmp/cloudflared"
     private const val downloadedLogPath = "/data/local/tmp/mobile-agent-cloudflared.log"
     private const val downloadedPidPath = "/data/local/tmp/mobile-agent-cloudflared.pid"
@@ -337,6 +340,20 @@ internal object TunnelRuntime {
             }.takeLast(logLineLimit),
             lastError = computedError,
         )
+        persistDebugSnapshot(
+            context = context,
+            status = latestStatus,
+            selection = selection,
+            spec = spec,
+            appReady = appReady,
+            bundledReady = bundledReady,
+            termuxReady = termuxReady,
+            termuxInstalled = termuxInstalled,
+            rootProbe = rootProbe,
+            rootAccessible = rootAccessible,
+            rootDaemonUnavailable = rootDaemonUnavailable,
+            versionCheck = versionCheck,
+        )
         return latestStatus
     }
 
@@ -398,6 +415,87 @@ internal object TunnelRuntime {
             status.logLines.forEach { appendLine(it) }
         }.lowercase()
         return combined.contains("[::1]:53") || combined.contains("could not lookup srv records")
+    }
+
+    private fun persistDebugSnapshot(
+        context: Context,
+        status: TunnelStatusSnapshot,
+        selection: TunnelBinarySelection,
+        spec: CloudflaredDownloadSpec,
+        appReady: Boolean,
+        bundledReady: Boolean,
+        termuxReady: Boolean,
+        termuxInstalled: Boolean,
+        rootProbe: TunnelShellResult,
+        rootAccessible: Boolean,
+        rootDaemonUnavailable: Boolean,
+        versionCheck: TunnelShellResult?,
+    ) {
+        try {
+            val appProbe = probeAppBinary(context)
+            val downloadedProbe = runRootCommand(
+                "if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi",
+                10_000,
+            )
+            val termuxProbe = if (termuxInstalled && rootAccessible) {
+                runTermuxCommand("test -x '$termuxBinaryPath' && echo ready", 10_000)
+            } else {
+                TunnelShellResult(
+                    executable = "sh",
+                    exitCode = -1,
+                    stdout = when {
+                        !termuxInstalled -> "Termux 未安装。"
+                        rootDaemonUnavailable -> "Magisk 服务未运行。"
+                        else -> "Root 不可用。"
+                    },
+                )
+            }
+            val wrapperFile = File(termuxWrapperPath)
+            val dump = JSONObject()
+                .put("generatedAt", System.currentTimeMillis())
+                .put("abi", spec.abiLabel)
+                .put("tokenBound", status.tokenBound)
+                .put("statusLabel", status.statusLabel)
+                .put("running", status.running)
+                .put("binaryPath", status.binaryPath)
+                .put("binaryReady", status.binaryReady)
+                .put("downloadStatus", status.downloadStatus)
+                .put("lastError", status.lastError ?: JSONObject.NULL)
+                .put("selectedSource", selection.id)
+                .put("selectedSourceLabel", selection.sourceLabel)
+                .put("appReady", appReady)
+                .put("bundledReady", bundledReady)
+                .put("termuxInstalled", termuxInstalled)
+                .put("termuxReady", termuxReady)
+                .put("rootAccessible", rootAccessible)
+                .put("rootDaemonUnavailable", rootDaemonUnavailable)
+                .put("termuxWrapperPath", termuxWrapperPath)
+                .put("termuxWrapperExists", wrapperFile.exists())
+                .put("termuxWrapperExecutable", wrapperFile.canExecute())
+                .put("probes", JSONObject()
+                    .put("root", shellResultJson(rootProbe))
+                    .put("appBinary", shellResultJson(appProbe))
+                    .put("downloadedBinary", shellResultJson(downloadedProbe))
+                    .put("termuxBinary", shellResultJson(termuxProbe))
+                    .put("selectedVersion", versionCheck?.let(::shellResultJson) ?: JSONObject.NULL)
+                )
+                .put("logLines", JSONArray(status.logLines))
+            val dumpFile = File(appStatusDumpDefaultPath)
+            dumpFile.writeText(dump.toString(2))
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun shellResultJson(result: TunnelShellResult): JSONObject {
+        return JSONObject()
+            .put("executable", result.executable)
+            .put("exitCode", result.exitCode)
+            .put("stdout", trimForDebug(result.stdout))
+    }
+
+    private fun trimForDebug(value: String, limit: Int = 800): String {
+        val normalized = value.trim()
+        return if (normalized.length <= limit) normalized else normalized.take(limit) + "...(truncated)"
     }
 
     private fun startSelection(selection: TunnelBinarySelection, token: String): TunnelShellResult {
