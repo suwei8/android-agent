@@ -7,6 +7,15 @@ android {
     namespace = "com.mobileagent.demo"
     compileSdk = 35
 
+    signingConfigs {
+        create("repoDebug") {
+            storeFile = rootProject.file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.mobileagent.demo"
         minSdk = 26
@@ -21,6 +30,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("repoDebug")
+        }
+
         release {
             isMinifyEnabled = false
             proguardFiles(
