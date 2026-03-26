@@ -51,6 +51,7 @@ internal object TunnelRuntime {
     private const val termuxHome = "/data/data/com.termux/files/home"
     private const val termuxTmp = "$termuxPrefix/tmp"
     private const val termuxLibPath = "$termuxPrefix/lib"
+    private const val termuxWrapperPath = "/data/local/tmp/mobile-agent-termux-wrapper.sh"
     private const val termuxBinaryPath = "$termuxPrefix/bin/cloudflared"
     private const val termuxLogPath = "$termuxHome/.mobile-agent-cloudflared.log"
     private const val termuxPidPath = "$termuxHome/.mobile-agent-cloudflared.pid"
@@ -760,17 +761,23 @@ internal object TunnelRuntime {
     }
 
     private fun runTermuxCommand(command: String, timeoutMs: Long): TunnelShellResult {
-        return runRootCommand(buildTermuxEnvironmentCommand(command), timeoutMs)
-    }
-
-    private fun buildTermuxEnvironmentCommand(command: String): String {
-        return "mkdir -p '$termuxTmp'; " +
-            "export PREFIX='$termuxPrefix'; " +
-            "export HOME='$termuxHome'; " +
-            "export TMPDIR='$termuxTmp'; " +
-            "export PATH='$termuxPrefix/bin:$termuxPrefix/bin/applets':\$PATH; " +
-            "export LD_LIBRARY_PATH='$termuxLibPath'; " +
-            command
+        val script = buildString {
+            appendLine("#!/system/bin/sh")
+            appendLine("mkdir -p $termuxTmp")
+            appendLine("export PREFIX=$termuxPrefix")
+            appendLine("export HOME=$termuxHome")
+            appendLine("export TMPDIR=$termuxTmp")
+            appendLine("export PATH=$termuxPrefix/bin:$termuxPrefix/bin/applets:\$PATH")
+            appendLine("export LD_LIBRARY_PATH=$termuxLibPath")
+            appendLine(command)
+        }
+        val wrapped =
+            "cat <<'EOF' > '$termuxWrapperPath'\n" +
+                script +
+                "EOF\n" +
+                "chmod 700 '$termuxWrapperPath'\n" +
+                "sh '$termuxWrapperPath'"
+        return runRootCommand(wrapped, timeoutMs)
     }
 
     private fun runRootCommand(command: String, timeoutMs: Long): TunnelShellResult {
