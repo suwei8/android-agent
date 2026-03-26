@@ -771,16 +771,25 @@ internal object TunnelRuntime {
             appendLine("export LD_LIBRARY_PATH=$termuxLibPath")
             appendLine(command)
         }
-        val writeScriptCommand =
-            "cat <<'EOF' > '$termuxWrapperPath'\n" +
-                script +
-                "EOF\n" +
-                "chmod 700 '$termuxWrapperPath'"
-        val writeResult = runAppCommand(writeScriptCommand, timeoutMs)
-        if (writeResult.exitCode != 0) {
-            return writeResult
+        return try {
+            val wrapperFile = File(termuxWrapperPath)
+            wrapperFile.parentFile?.mkdirs()
+            wrapperFile.writeText(script)
+            if (!wrapperFile.setExecutable(true, true)) {
+                return TunnelShellResult(
+                    executable = "sh",
+                    exitCode = -1,
+                    stdout = "无法为 Termux wrapper 设置可执行权限。",
+                )
+            }
+            runRootCommand("sh '$termuxWrapperPath'", timeoutMs)
+        } catch (t: Throwable) {
+            TunnelShellResult(
+                executable = "sh",
+                exitCode = -1,
+                stdout = t.message.orEmpty(),
+            )
         }
-        return runRootCommand("sh '$termuxWrapperPath'", timeoutMs)
     }
 
     private fun runRootCommand(command: String, timeoutMs: Long): TunnelShellResult {
