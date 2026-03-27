@@ -433,9 +433,12 @@ internal object MobileAgentRuntime {
             .put("host", status.host)
             .put("port", status.port)
             .put("exitFamily", status.exitFamily.name.lowercase())
+            .put("bindHost", status.bindHost)
             .put("running", status.running)
             .put("currentConnections", status.currentConnections)
             .put("startedAt", status.startedAt ?: JSONObject.NULL)
+            .put("localIpv4Reachable", status.localIpv4Reachable ?: JSONObject.NULL)
+            .put("localIpv6Reachable", status.localIpv6Reachable ?: JSONObject.NULL)
             .put("lastError", status.lastError ?: JSONObject.NULL)
     }
 

@@ -16,7 +16,6 @@ import java.net.SocketException
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -53,9 +52,12 @@ internal data class ProxyNodeRuntimeSnapshot(
     val host: String,
     val port: Int,
     val exitFamily: ProxyAddressFamily,
+    val bindHost: String,
     val running: Boolean,
     val currentConnections: Int,
     val startedAt: Long?,
+    val localIpv4Reachable: Boolean?,
+    val localIpv6Reachable: Boolean?,
     val lastError: String?,
 )
 
@@ -126,9 +128,12 @@ internal object ProxyRuntime {
             host = config.host,
             port = config.port,
             exitFamily = config.exitFamily,
+            bindHost = inferBindHost(config.host),
             running = false,
             currentConnections = 0,
             startedAt = null,
+            localIpv4Reachable = null,
+            localIpv6Reachable = null,
             lastError = lastError,
         )
     }
@@ -141,12 +146,19 @@ private class RunningProxyNode(
     private val activeConnections = AtomicInteger(0)
     private val startedAt = System.currentTimeMillis()
     private val serverSocket = ServerSocket()
+    private val bindHost = inferBindHost(config.host)
 
     @Volatile
     private var accepting = true
 
     @Volatile
     private var lastError: String? = null
+
+    @Volatile
+    private var localIpv4Reachable: Boolean? = null
+
+    @Volatile
+    private var localIpv6Reachable: Boolean? = null
 
     private val acceptThread = thread(
         start = false,
@@ -158,7 +170,8 @@ private class RunningProxyNode(
 
     fun start() {
         serverSocket.reuseAddress = true
-        serverSocket.bind(InetSocketAddress(config.port))
+        serverSocket.bind(InetSocketAddress(InetAddress.getByName(bindHost), config.port))
+        refreshLocalReachability()
         acceptThread.start()
     }
 
@@ -170,9 +183,12 @@ private class RunningProxyNode(
             host = config.host,
             port = config.port,
             exitFamily = config.exitFamily,
+            bindHost = bindHost,
             running = accepting && !serverSocket.isClosed,
             currentConnections = activeConnections.get(),
             startedAt = startedAt,
+            localIpv4Reachable = localIpv4Reachable,
+            localIpv6Reachable = localIpv6Reachable,
             lastError = lastError,
         )
     }
@@ -196,7 +212,9 @@ private class RunningProxyNode(
                             ProxyBackendType.HTTP -> handleHttpProxy(client)
                         }
                     } catch (t: Throwable) {
-                        lastError = t.message ?: "代理连接处理失败"
+                        if (!isIgnorableClientFailure(t)) {
+                            lastError = t.message ?: "代理连接处理失败"
+                        }
                     } finally {
                         activeConnections.decrementAndGet()
                         runCatching { client.close() }
@@ -213,6 +231,21 @@ private class RunningProxyNode(
                 return
             }
         }
+    }
+
+    private fun refreshLocalReachability() {
+        localIpv4Reachable = probeLocalLoopback("127.0.0.1")
+        localIpv6Reachable = probeLocalLoopback("::1")
+    }
+
+    private fun probeLocalLoopback(host: String): Boolean {
+        return runCatching {
+            Socket().use { socket ->
+                socket.tcpNoDelay = true
+                socket.connect(InetSocketAddress(host, config.port), 1_500)
+            }
+            true
+        }.getOrElse { false }
     }
 
     private fun handleSocks5(client: Socket) {
@@ -495,6 +528,14 @@ private class RunningProxyNode(
         )
         output.flush()
     }
+}
+
+private fun inferBindHost(configHost: String): String {
+    return if (configHost.contains(':')) "::" else "0.0.0.0"
+}
+
+private fun isIgnorableClientFailure(t: Throwable): Boolean {
+    return t is EOFException || t is SocketException
 }
 
 private fun InputStream.readExact(length: Int): ByteArray {

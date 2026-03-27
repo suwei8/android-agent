@@ -143,12 +143,15 @@ private data class ProxyNode(
     val host: String,
     val port: Int,
     val exitFamily: NodeExitFamily,
+    val bindHost: String,
     val authEnabled: Boolean,
     val username: String,
     val password: String,
     val status: NodeStatus,
     val currentConnections: Int,
     val lastStarted: String,
+    val localIpv4Reachable: Boolean?,
+    val localIpv6Reachable: Boolean?,
 )
 
 private data class RotateTask(
@@ -231,6 +234,9 @@ private fun ProxyNode.applyRuntimeSnapshot(snapshot: ProxyNodeRuntimeSnapshot): 
             snapshot.startedAt != null -> "最近启动"
             else -> "未启动"
         },
+        bindHost = snapshot.bindHost,
+        localIpv4Reachable = snapshot.localIpv4Reachable,
+        localIpv6Reachable = snapshot.localIpv6Reachable,
     )
 }
 
@@ -246,6 +252,19 @@ private fun ProxyNode.accessHost(networkState: NetworkState): String? {
 private fun ProxyNode.accessAddressLabel(networkState: NetworkState): String {
     val host = accessHost(networkState) ?: return "当前未获取可用公网地址"
     return if (host.contains(':')) "[${host}]:$port" else "$host:$port"
+}
+
+private fun ProxyNode.bindLabel(): String {
+    return if (bindHost.contains(':')) "[::]:$port" else "0.0.0.0:$port"
+}
+
+private fun ProxyNode.localCheckLabel(): String {
+    fun format(flag: Boolean?): String = when (flag) {
+        true -> "可达"
+        false -> "失败"
+        null -> "未测"
+    }
+    return "IPv4 ${format(localIpv4Reachable)} / IPv6 ${format(localIpv6Reachable)}"
 }
 
 private fun NetworkState.publicHostFor(family: NodeExitFamily): String? {
@@ -535,7 +554,14 @@ private fun MobileAgentDemoApp() {
                         val snapshot = ProxyRuntime.stop(node.id)
                         val updated = if (snapshot != null) node.applyRuntimeSnapshot(snapshot) else node.copy(status = NodeStatus.Stopped, currentConnections = 0)
                         updateNode(updated)
-                        selectedNode = selectedNode?.takeIf { it.id == node.id }?.copy(status = updated.status, currentConnections = updated.currentConnections, lastStarted = updated.lastStarted)
+                        selectedNode = selectedNode?.takeIf { it.id == node.id }?.copy(
+                            status = updated.status,
+                            currentConnections = updated.currentConnections,
+                            lastStarted = updated.lastStarted,
+                            bindHost = updated.bindHost,
+                            localIpv4Reachable = updated.localIpv4Reachable,
+                            localIpv6Reachable = updated.localIpv6Reachable,
+                        )
                         toast("${node.name} 已停止")
                     }
                 },
@@ -803,8 +829,10 @@ private fun NodesScreen(
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         TinyInfoChip(icon = Icons.Default.Lock, label = if (node.authEnabled) "已开启认证" else "匿名访问")
                         TinyInfoChip(icon = Icons.Default.Language, label = "出口 ${node.exitFamily.label}")
+                        TinyInfoChip(icon = Icons.Default.Router, label = "监听 ${if (node.bindHost.contains(':')) "IPv6" else "IPv4"}")
                         TinyInfoChip(icon = Icons.Default.Sync, label = "连接 ${node.currentConnections}")
                         TinyInfoChip(icon = Icons.Default.PowerSettingsNew, label = "最近启动 ${node.lastStarted}")
+                        TinyInfoChip(icon = Icons.Default.CellTower, label = "自检 ${node.localCheckLabel()}")
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilledTonalButton(onClick = { if (node.status == NodeStatus.Running) onStopNode(node) else onStartNode(node) }) {
@@ -1178,12 +1206,15 @@ private fun CreateNodeDialog(
                             host = accessPreview.takeIf { it != "未获取" } ?: "::",
                             port = port.toIntOrNull() ?: type.defaultPort,
                             exitFamily = exitFamily,
+                            bindHost = if ((accessPreview.takeIf { it != "未获取" } ?: "::").contains(':')) "::" else "0.0.0.0",
                             authEnabled = authEnabled,
                             username = username,
                             password = password,
                             status = NodeStatus.Stopped,
                             currentConnections = 0,
                             lastStarted = "未启动",
+                            localIpv4Reachable = null,
+                            localIpv6Reachable = null,
                         )
                     )
                 }
@@ -1217,7 +1248,9 @@ private fun NodeDetailDialog(
                 }
                 HorizontalDivider()
                 Text("监听方式：全接口监听")
+                Text("监听绑定：${node.bindLabel()}")
                 Text("出口协议族：${node.exitFamily.label}")
+                Text("本机回环自检：${node.localCheckLabel()}")
                 Text("访问认证：${if (node.authEnabled) "已开启" else "未开启"}")
                 if (node.authEnabled) {
                     Text("用户名：${node.username}")
@@ -1406,12 +1439,15 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         host = "::",
         port = 1080,
         exitFamily = NodeExitFamily.Auto,
+        bindHost = "::",
         authEnabled = true,
         username = "agent",
         password = "12345678",
         status = NodeStatus.Stopped,
         currentConnections = 0,
         lastStarted = "未启动",
+        localIpv4Reachable = null,
+        localIpv6Reachable = null,
     ),
     ProxyNode(
         id = 2,
@@ -1420,12 +1456,15 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         host = "::",
         port = 8080,
         exitFamily = NodeExitFamily.Auto,
+        bindHost = "::",
         authEnabled = true,
         username = "browser",
         password = "87654321",
         status = NodeStatus.Stopped,
         currentConnections = 0,
         lastStarted = "未启动",
+        localIpv4Reachable = null,
+        localIpv6Reachable = null,
     ),
 )
 
