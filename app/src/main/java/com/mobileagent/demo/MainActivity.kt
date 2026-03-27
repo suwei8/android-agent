@@ -152,6 +152,8 @@ private data class ProxyNode(
     val lastStarted: String,
     val localIpv4Reachable: Boolean?,
     val localIpv6Reachable: Boolean?,
+    val localIpv4Status: String,
+    val localIpv6Status: String,
 )
 
 private data class RotateTask(
@@ -237,6 +239,8 @@ private fun ProxyNode.applyRuntimeSnapshot(snapshot: ProxyNodeRuntimeSnapshot): 
         bindHost = snapshot.bindHost,
         localIpv4Reachable = snapshot.localIpv4Reachable,
         localIpv6Reachable = snapshot.localIpv6Reachable,
+        localIpv4Status = snapshot.localIpv4Status,
+        localIpv6Status = snapshot.localIpv6Status,
     )
 }
 
@@ -255,16 +259,25 @@ private fun ProxyNode.accessAddressLabel(networkState: NetworkState): String {
 }
 
 private fun ProxyNode.bindLabel(): String {
-    return if (bindHost.contains(':')) "[::]:$port" else "0.0.0.0:$port"
+    return when {
+        bindHost.contains("+") -> "[::]:$port + 0.0.0.0:$port"
+        bindHost.contains(':') -> "[::]:$port"
+        else -> "0.0.0.0:$port"
+    }
+}
+
+private fun ProxyNode.listenerFamilyLabel(): String {
+    val hasIpv6 = bindHost.contains(':')
+    val hasIpv4 = bindHost.contains("0.0.0.0")
+    return when {
+        hasIpv4 && hasIpv6 -> "双栈"
+        hasIpv6 -> "IPv6"
+        else -> "IPv4"
+    }
 }
 
 private fun ProxyNode.localCheckLabel(): String {
-    fun format(flag: Boolean?): String = when (flag) {
-        true -> "可达"
-        false -> "失败"
-        null -> "未测"
-    }
-    return "IPv4 ${format(localIpv4Reachable)} / IPv6 ${format(localIpv6Reachable)}"
+    return "IPv4 $localIpv4Status / IPv6 $localIpv6Status"
 }
 
 private fun NetworkState.publicHostFor(family: NodeExitFamily): String? {
@@ -561,6 +574,8 @@ private fun MobileAgentDemoApp() {
                             bindHost = updated.bindHost,
                             localIpv4Reachable = updated.localIpv4Reachable,
                             localIpv6Reachable = updated.localIpv6Reachable,
+                            localIpv4Status = updated.localIpv4Status,
+                            localIpv6Status = updated.localIpv6Status,
                         )
                         toast("${node.name} 已停止")
                     }
@@ -829,7 +844,7 @@ private fun NodesScreen(
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         TinyInfoChip(icon = Icons.Default.Lock, label = if (node.authEnabled) "已开启认证" else "匿名访问")
                         TinyInfoChip(icon = Icons.Default.Language, label = "出口 ${node.exitFamily.label}")
-                        TinyInfoChip(icon = Icons.Default.Router, label = "监听 ${if (node.bindHost.contains(':')) "IPv6" else "IPv4"}")
+                        TinyInfoChip(icon = Icons.Default.Router, label = "监听 ${node.listenerFamilyLabel()}")
                         TinyInfoChip(icon = Icons.Default.Sync, label = "连接 ${node.currentConnections}")
                         TinyInfoChip(icon = Icons.Default.PowerSettingsNew, label = "最近启动 ${node.lastStarted}")
                         TinyInfoChip(icon = Icons.Default.CellTower, label = "自检 ${node.localCheckLabel()}")
@@ -1206,7 +1221,7 @@ private fun CreateNodeDialog(
                             host = accessPreview.takeIf { it != "未获取" } ?: "::",
                             port = port.toIntOrNull() ?: type.defaultPort,
                             exitFamily = exitFamily,
-                            bindHost = if ((accessPreview.takeIf { it != "未获取" } ?: "::").contains(':')) "::" else "0.0.0.0",
+                            bindHost = if ((accessPreview.takeIf { it != "未获取" } ?: "::").contains(':')) "[::] + 0.0.0.0" else "0.0.0.0",
                             authEnabled = authEnabled,
                             username = username,
                             password = password,
@@ -1215,6 +1230,8 @@ private fun CreateNodeDialog(
                             lastStarted = "未启动",
                             localIpv4Reachable = null,
                             localIpv6Reachable = null,
+                            localIpv4Status = "未测",
+                            localIpv6Status = "未测",
                         )
                     )
                 }
@@ -1439,7 +1456,7 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         host = "::",
         port = 1080,
         exitFamily = NodeExitFamily.Auto,
-        bindHost = "::",
+        bindHost = "[::] + 0.0.0.0",
         authEnabled = true,
         username = "agent",
         password = "12345678",
@@ -1448,6 +1465,8 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         lastStarted = "未启动",
         localIpv4Reachable = null,
         localIpv6Reachable = null,
+        localIpv4Status = "未测",
+        localIpv6Status = "未测",
     ),
     ProxyNode(
         id = 2,
@@ -1456,7 +1475,7 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         host = "::",
         port = 8080,
         exitFamily = NodeExitFamily.Auto,
-        bindHost = "::",
+        bindHost = "[::] + 0.0.0.0",
         authEnabled = true,
         username = "browser",
         password = "87654321",
@@ -1465,6 +1484,8 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         lastStarted = "未启动",
         localIpv4Reachable = null,
         localIpv6Reachable = null,
+        localIpv4Status = "未测",
+        localIpv6Status = "未测",
     ),
 )
 

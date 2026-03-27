@@ -15,6 +15,7 @@ import java.net.Socket
 import java.net.SocketException
 import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.net.BindException
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -58,6 +59,8 @@ internal data class ProxyNodeRuntimeSnapshot(
     val startedAt: Long?,
     val localIpv4Reachable: Boolean?,
     val localIpv6Reachable: Boolean?,
+    val localIpv4Status: String,
+    val localIpv6Status: String,
     val lastError: String?,
 )
 
@@ -134,10 +137,17 @@ internal object ProxyRuntime {
             startedAt = null,
             localIpv4Reachable = null,
             localIpv6Reachable = null,
+            localIpv4Status = "未测",
+            localIpv6Status = "未测",
             lastError = lastError,
         )
     }
 }
+
+private data class ProxySelfTestResult(
+    val success: Boolean,
+    val status: String,
+)
 
 private class RunningProxyNode(
     val config: ProxyNodeConfig,
@@ -145,8 +155,7 @@ private class RunningProxyNode(
     private val workerPool: ExecutorService = Executors.newCachedThreadPool()
     private val activeConnections = AtomicInteger(0)
     private val startedAt = System.currentTimeMillis()
-    private val serverSocket = ServerSocket()
-    private val bindHost = inferBindHost(config.host)
+    private val listeners = mutableListOf<ListenerBinding>()
 
     @Volatile
     private var accepting = true
@@ -160,19 +169,38 @@ private class RunningProxyNode(
     @Volatile
     private var localIpv6Reachable: Boolean? = null
 
-    private val acceptThread = thread(
-        start = false,
-        name = "proxy-node-${config.id}-${config.type.name.lowercase(Locale.US)}",
-        isDaemon = true,
-    ) {
-        acceptLoop()
-    }
+    @Volatile
+    private var localIpv4Status: String = "自检中"
+
+    @Volatile
+    private var localIpv6Status: String = "自检中"
 
     fun start() {
-        serverSocket.reuseAddress = true
-        serverSocket.bind(InetSocketAddress(InetAddress.getByName(bindHost), config.port))
-        refreshLocalReachability()
-        acceptThread.start()
+        val bindHosts = inferBindHosts(config.host)
+        bindHosts.forEachIndexed { index, host ->
+            val serverSocket = ServerSocket()
+            try {
+                serverSocket.reuseAddress = true
+                serverSocket.bind(InetSocketAddress(InetAddress.getByName(host), config.port))
+                val acceptThread = thread(
+                    start = false,
+                    name = "proxy-node-${config.id}-${index}-${config.type.name.lowercase(Locale.US)}",
+                    isDaemon = true,
+                ) {
+                    acceptLoop(serverSocket)
+                }
+                listeners += ListenerBinding(host = host, serverSocket = serverSocket, acceptThread = acceptThread)
+            } catch (t: Throwable) {
+                runCatching { serverSocket.close() }
+                if (t is BindException && listeners.isNotEmpty()) {
+                    return@forEachIndexed
+                }
+                throw t
+            }
+        }
+        check(listeners.isNotEmpty()) { "代理启动失败：没有成功绑定任何监听地址" }
+        listeners.forEach { it.acceptThread.start() }
+        scheduleLocalSelfTests()
     }
 
     fun snapshot(): ProxyNodeRuntimeSnapshot {
@@ -183,23 +211,27 @@ private class RunningProxyNode(
             host = config.host,
             port = config.port,
             exitFamily = config.exitFamily,
-            bindHost = bindHost,
-            running = accepting && !serverSocket.isClosed,
+            bindHost = listeners.joinToString(" + ") { formatBindHost(it.host) },
+            running = accepting && listeners.any { !it.serverSocket.isClosed },
             currentConnections = activeConnections.get(),
             startedAt = startedAt,
             localIpv4Reachable = localIpv4Reachable,
             localIpv6Reachable = localIpv6Reachable,
+            localIpv4Status = localIpv4Status,
+            localIpv6Status = localIpv6Status,
             lastError = lastError,
         )
     }
 
     fun close() {
         accepting = false
-        runCatching { serverSocket.close() }
+        listeners.forEach { binding ->
+            runCatching { binding.serverSocket.close() }
+        }
         workerPool.shutdownNow()
     }
 
-    private fun acceptLoop() {
+    private fun acceptLoop(serverSocket: ServerSocket) {
         while (accepting) {
             try {
                 val client = serverSocket.accept()
@@ -233,19 +265,123 @@ private class RunningProxyNode(
         }
     }
 
-    private fun refreshLocalReachability() {
-        localIpv4Reachable = probeLocalLoopback("127.0.0.1")
-        localIpv6Reachable = probeLocalLoopback("::1")
+    private fun scheduleLocalSelfTests() {
+        workerPool.execute {
+            runLocalSelfTests()
+        }
     }
 
-    private fun probeLocalLoopback(host: String): Boolean {
+    private fun runLocalSelfTests() {
+        val supportsIpv4 = listeners.any { it.host == "0.0.0.0" || it.host == "::" }
+        val supportsIpv6 = listeners.any { it.host == "::" }
+
+        if (!supportsIpv4) {
+            localIpv4Reachable = false
+            localIpv4Status = "未监听"
+        } else {
+            val result = runLocalSelfTest("127.0.0.1")
+            localIpv4Reachable = result.success
+            localIpv4Status = result.status
+        }
+
+        if (!supportsIpv6) {
+            localIpv6Reachable = false
+            localIpv6Status = "未监听"
+        } else {
+            val result = runLocalSelfTest("::1")
+            localIpv6Reachable = result.success
+            localIpv6Status = result.status
+        }
+    }
+
+    private fun runLocalSelfTest(host: String): ProxySelfTestResult {
         return runCatching {
             Socket().use { socket ->
                 socket.tcpNoDelay = true
-                socket.connect(InetSocketAddress(host, config.port), 1_500)
+                socket.soTimeout = 2_500
+                socket.connect(InetSocketAddress(host, config.port), 2_500)
+                when (config.type) {
+                    ProxyBackendType.SOCKS5 -> testSocks5Proxy(socket)
+                    ProxyBackendType.HTTP -> testHttpProxy(socket)
+                }
             }
-            true
-        }.getOrElse { false }
+        }.getOrElse { error ->
+            val message = error.message.orEmpty()
+            when {
+                message.contains("Connection refused", ignoreCase = true) -> ProxySelfTestResult(false, "TCP失败")
+                message.contains("timed out", ignoreCase = true) -> ProxySelfTestResult(false, "TCP超时")
+                else -> ProxySelfTestResult(false, "TCP失败")
+            }
+        }
+    }
+
+    private fun testSocks5Proxy(socket: Socket): ProxySelfTestResult {
+        val input = BufferedInputStream(socket.getInputStream())
+        val output = BufferedOutputStream(socket.getOutputStream())
+        val methods = if (config.authEnabled) byteArrayOf(0x00, 0x02) else byteArrayOf(0x00)
+        output.write(byteArrayOf(0x05, methods.size.toByte()))
+        output.write(methods)
+        output.flush()
+
+        val response = input.readExact(2)
+        if (response[0].toInt() != 0x05) {
+            return ProxySelfTestResult(false, "握手失败")
+        }
+        when (response[1].toInt() and 0xFF) {
+            0xFF -> return ProxySelfTestResult(false, "认证拒绝")
+            0x02 -> {
+                val username = config.username.toByteArray(StandardCharsets.UTF_8)
+                val password = config.password.toByteArray(StandardCharsets.UTF_8)
+                output.write(byteArrayOf(0x01, username.size.toByte()))
+                output.write(username)
+                output.write(byteArrayOf(password.size.toByte()))
+                output.write(password)
+                output.flush()
+                val authResponse = input.readExact(2)
+                if (authResponse[1].toInt() != 0x00) {
+                    return ProxySelfTestResult(false, "认证失败")
+                }
+            }
+            0x00 -> if (config.authEnabled) {
+                return ProxySelfTestResult(false, "认证降级")
+            }
+        }
+
+        val targetHost = "example.com".toByteArray(StandardCharsets.UTF_8)
+        output.write(byteArrayOf(0x05, 0x01, 0x00, 0x03, targetHost.size.toByte()))
+        output.write(targetHost)
+        output.write(byteArrayOf(0x01, 0xBB.toByte()))
+        output.flush()
+
+        val connectHead = input.readExact(4)
+        if (connectHead[1].toInt() != 0x00) {
+            return ProxySelfTestResult(false, "出站失败")
+        }
+        skipSocks5Address(input, connectHead[3].toInt() and 0xFF)
+        return ProxySelfTestResult(true, "就绪")
+    }
+
+    private fun testHttpProxy(socket: Socket): ProxySelfTestResult {
+        val input = BufferedInputStream(socket.getInputStream())
+        val output = BufferedOutputStream(socket.getOutputStream())
+        output.write("CONNECT example.com:443 HTTP/1.1\r\n".toByteArray(StandardCharsets.ISO_8859_1))
+        output.write("Host: example.com:443\r\n".toByteArray(StandardCharsets.ISO_8859_1))
+        if (config.authEnabled) {
+            val auth = Base64.encodeToString(
+                "${config.username}:${config.password}".toByteArray(StandardCharsets.UTF_8),
+                Base64.NO_WRAP,
+            )
+            output.write("Proxy-Authorization: Basic $auth\r\n".toByteArray(StandardCharsets.ISO_8859_1))
+        }
+        output.write("Connection: close\r\n\r\n".toByteArray(StandardCharsets.ISO_8859_1))
+        output.flush()
+        val statusLine = input.readAsciiLine().orEmpty()
+        return when {
+            statusLine.contains(" 200 ") -> ProxySelfTestResult(true, "就绪")
+            statusLine.contains(" 407 ") -> ProxySelfTestResult(false, "认证失败")
+            statusLine.isBlank() -> ProxySelfTestResult(false, "握手失败")
+            else -> ProxySelfTestResult(false, "出站失败")
+        }
     }
 
     private fun handleSocks5(client: Socket) {
@@ -530,12 +666,36 @@ private class RunningProxyNode(
     }
 }
 
+private data class ListenerBinding(
+    val host: String,
+    val serverSocket: ServerSocket,
+    val acceptThread: Thread,
+)
+
 private fun inferBindHost(configHost: String): String {
-    return if (configHost.contains(':')) "::" else "0.0.0.0"
+    return inferBindHosts(configHost).joinToString(" + ") { formatBindHost(it) }
+}
+
+private fun inferBindHosts(configHost: String): List<String> {
+    return if (configHost.contains(':')) listOf("::", "0.0.0.0") else listOf("0.0.0.0")
+}
+
+private fun formatBindHost(host: String): String {
+    return if (host.contains(':')) "[::]" else host
 }
 
 private fun isIgnorableClientFailure(t: Throwable): Boolean {
     return t is EOFException || t is SocketException
+}
+
+private fun skipSocks5Address(input: InputStream, addressType: Int) {
+    when (addressType) {
+        0x01 -> input.readExact(4)
+        0x03 -> input.readExact(input.readUnsignedByte())
+        0x04 -> input.readExact(16)
+        else -> throw EOFException("未知 SOCKS5 地址类型: $addressType")
+    }
+    input.readExact(2)
 }
 
 private fun InputStream.readExact(length: Int): ByteArray {

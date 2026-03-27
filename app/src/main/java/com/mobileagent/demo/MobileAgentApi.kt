@@ -439,6 +439,8 @@ internal object MobileAgentRuntime {
             .put("startedAt", status.startedAt ?: JSONObject.NULL)
             .put("localIpv4Reachable", status.localIpv4Reachable ?: JSONObject.NULL)
             .put("localIpv6Reachable", status.localIpv6Reachable ?: JSONObject.NULL)
+            .put("localIpv4Status", status.localIpv4Status)
+            .put("localIpv6Status", status.localIpv6Status)
             .put("lastError", status.lastError ?: JSONObject.NULL)
     }
 
