@@ -531,6 +531,8 @@ private data class TunnelLogHealth(
 */
 
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -567,6 +569,7 @@ internal object TunnelRuntime {
 
     private const val binarySourceDownloaded = "downloaded"
     private const val binarySourceTermux = "termux"
+    private const val runAsBinary = "/system/bin/run-as"
 
     private const val downloadedBinaryPath = "/data/local/tmp/cloudflared"
     private const val downloadedLogPath = "/data/local/tmp/mobile-agent-cloudflared.log"
@@ -575,9 +578,20 @@ internal object TunnelRuntime {
     private const val termuxPackageName = "com.termux"
     private const val termuxPrefix = "/data/data/com.termux/files/usr"
     private const val termuxHome = "/data/data/com.termux/files/home"
+    private const val termuxPropertiesPath = "$termuxHome/.termux/termux.properties"
     private const val termuxBinaryPath = "$termuxPrefix/bin/cloudflared"
+    private const val termuxShellPath = "$termuxPrefix/bin/bash"
     private const val termuxLogPath = "$termuxHome/.mobile-agent-cloudflared.log"
     private const val termuxPidPath = "$termuxHome/.mobile-agent-cloudflared.pid"
+    private const val termuxRunCommandPermission = "com.termux.permission.RUN_COMMAND"
+    private const val termuxRunCommandService = "com.termux.app.RunCommandService"
+    private const val termuxRunCommandAction = "com.termux.RUN_COMMAND"
+    private const val termuxExtraCommandPath = "com.termux.RUN_COMMAND_PATH"
+    private const val termuxExtraArguments = "com.termux.RUN_COMMAND_ARGUMENTS"
+    private const val termuxExtraWorkdir = "com.termux.RUN_COMMAND_WORKDIR"
+    private const val termuxExtraBackground = "com.termux.RUN_COMMAND_BACKGROUND"
+    private const val termuxExtraSessionAction = "com.termux.RUN_COMMAND_SESSION_ACTION"
+    private const val termuxSessionActionBackground = 0
 
     private val termuxRepoBaseUrls = listOf(
         "https://packages.termux.dev/apt/termux-main",
@@ -682,14 +696,14 @@ internal object TunnelRuntime {
         }
 
         stopInternal()
-        var startResult = startSelection(selection, token)
+        var startResult = startSelection(context, selection, token)
         var status = waitForStableStatus(context, selection, startResult.stdout.trim().ifBlank { null })
 
         if (shouldFallbackToTermux(status) && selection.id != binarySourceTermux) {
             val termuxSelection = resolveSpecificBinarySelection(binarySourceTermux)
             if (termuxSelection.ready) {
                 stopInternal()
-                startResult = startSelection(termuxSelection, token)
+                startResult = startSelection(context, termuxSelection, token)
                 status = waitForStableStatus(context, termuxSelection, startResult.stdout.trim().ifBlank { null })
                 saveBinarySource(context, binarySourceTermux)
                 return@withContext status
@@ -718,9 +732,8 @@ internal object TunnelRuntime {
         val token = getSavedToken(context)
         val savedDomain = getSavedDomain(context).ifBlank { "Not configured" }
         val spec = resolveDownloadSpec()
-        val escapedBinaryPath = escapeForSingleQuotes(selection.path)
         val versionCheck = if (selection.ready) {
-            runSelectionCommand(selection, "'$escapedBinaryPath' --version", 15_000)
+            probeBinaryVersion(selection)
         } else {
             null
         }
@@ -832,14 +845,70 @@ internal object TunnelRuntime {
         return combined.contains("[::1]:53") || combined.contains("could not lookup srv records")
     }
 
-    private fun startSelection(selection: TunnelBinarySelection, token: String): TunnelShellResult {
+    private fun startSelection(context: Context, selection: TunnelBinarySelection, token: String): TunnelShellResult {
         val escapedBinaryPath = escapeForSingleQuotes(selection.path)
         val escapedToken = escapeForSingleQuotes(token)
         val startCommand = when (selection.id) {
-            binarySourceTermux -> "rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
+            binarySourceTermux -> return startTermuxService(context, escapedToken)
             else -> "chmod 755 '$escapedBinaryPath'; rm -f '${selection.logPath}' '${selection.pidPath}'; nohup '$escapedBinaryPath' tunnel --no-autoupdate run --token '$escapedToken' > '${selection.logPath}' 2>&1 & echo \$! > '${selection.pidPath}'"
         }
-        return runSelectionCommand(selection, startCommand, 15_000)
+        return runRootCommand(startCommand, 15_000)
+    }
+
+    private fun startTermuxService(context: Context, escapedToken: String): TunnelShellResult {
+        if (!isTermuxRunCommandPermissionGranted(context)) {
+            return TunnelShellResult(
+                executable = termuxRunCommandService,
+                exitCode = 1,
+                stdout = "Termux RUN_COMMAND permission is not granted.",
+            )
+        }
+        if (!isTermuxExternalAppsEnabled()) {
+            return TunnelShellResult(
+                executable = termuxRunCommandService,
+                exitCode = 1,
+                stdout = "Termux allow-external-apps is disabled.",
+            )
+        }
+
+        val script = buildString {
+            append("export PREFIX='$termuxPrefix'; ")
+            append("export HOME='$termuxHome'; ")
+            append("export PATH='$termuxPrefix/bin:$termuxPrefix/bin/applets':\$PATH; ")
+            append("rm -f '$termuxLogPath' '$termuxPidPath'; ")
+            append("nohup '$termuxBinaryPath' tunnel run --token '$escapedToken' > '$termuxLogPath' 2>&1 & ")
+            append("echo \$! > '$termuxPidPath'")
+        }
+        val intent = Intent(termuxRunCommandAction)
+            .setClassName(termuxPackageName, termuxRunCommandService)
+            .putExtra(termuxExtraCommandPath, termuxShellPath)
+            .putExtra(termuxExtraArguments, arrayOf("-lc", script))
+            .putExtra(termuxExtraWorkdir, termuxHome)
+            .putExtra(termuxExtraBackground, true)
+            .putExtra(termuxExtraSessionAction, termuxSessionActionBackground)
+
+        return try {
+            val componentName = context.startService(intent)
+            if (componentName != null) {
+                TunnelShellResult(
+                    executable = componentName.flattenToShortString(),
+                    exitCode = 0,
+                    stdout = "Termux RunCommandService started.",
+                )
+            } else {
+                TunnelShellResult(
+                    executable = termuxRunCommandService,
+                    exitCode = 1,
+                    stdout = "Termux RunCommandService returned no component.",
+                )
+            }
+        } catch (t: Throwable) {
+            TunnelShellResult(
+                executable = termuxRunCommandService,
+                exitCode = 1,
+                stdout = t.message.orEmpty().ifBlank { "Failed to start Termux RunCommandService." },
+            )
+        }
     }
 
     private fun stopInternal() {
@@ -863,9 +932,9 @@ internal object TunnelRuntime {
 
     private fun resolveBinarySelection(preferredSource: String): TunnelBinarySelection {
         val selections = buildBinarySelections()
-        return selections.firstOrNull { it.id == preferredSource && it.ready }
+        return selections.firstOrNull { it.id == binarySourceTermux && it.ready }
+            ?: selections.firstOrNull { it.id == preferredSource && it.ready }
             ?: selections.firstOrNull { it.id == binarySourceDownloaded && it.ready }
-            ?: selections.firstOrNull { it.id == binarySourceTermux && it.ready }
             ?: selections.firstOrNull { it.id == preferredSource }
             ?: selections.first()
     }
@@ -884,12 +953,11 @@ internal object TunnelRuntime {
     }
 
     private fun buildBinarySelections(): List<TunnelBinarySelection> {
-        val downloadedReady = runRootCommand("if [ -x '$downloadedBinaryPath' ]; then echo ready; else echo missing; fi", 10_000)
-            .stdout
-            .contains("ready")
-        val termuxReady = runTermuxCommand("test -x '$termuxBinaryPath' && echo ready", 10_000)
-            .stdout
-            .contains("ready")
+        val downloadedReady = canExecuteBinary(
+            path = downloadedBinaryPath,
+            launchMode = TunnelLaunchMode.ROOT,
+        )
+        val termuxReady = isTermuxBinaryAvailable()
         return listOf(
             TunnelBinarySelection(
                 id = binarySourceDownloaded,
@@ -910,6 +978,53 @@ internal object TunnelRuntime {
                 launchMode = TunnelLaunchMode.TERMUX,
             ),
         )
+    }
+
+    private fun isTermuxBinaryAvailable(): Boolean {
+        val packageCheck = runRootCommand("pm path $termuxPackageName", 10_000)
+        if (packageCheck.exitCode != 0 || !packageCheck.stdout.contains("package:")) {
+            return false
+        }
+        val binaryCheck = runRootCommand("test -f '$termuxBinaryPath' && echo ready || echo missing", 10_000)
+        return binaryCheck.exitCode == 0 && binaryCheck.stdout.contains("ready")
+    }
+
+    private fun isTermuxRunCommandPermissionGranted(context: Context): Boolean {
+        return context.checkSelfPermission(termuxRunCommandPermission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun isTermuxExternalAppsEnabled(): Boolean {
+        val propertyCheck = runRootCommand(
+            "if [ -f '$termuxPropertiesPath' ]; then grep -E '^[[:space:]]*allow-external-apps[[:space:]]*=[[:space:]]*true[[:space:]]*$' '$termuxPropertiesPath'; fi",
+            10_000,
+        )
+        return propertyCheck.exitCode == 0 && propertyCheck.stdout.contains("allow-external-apps")
+    }
+
+    private fun canExecuteBinary(path: String, launchMode: TunnelLaunchMode): Boolean {
+        val probe = probeBinaryVersion(
+            TunnelBinarySelection(
+                id = "",
+                path = path,
+                ready = false,
+                sourceLabel = "",
+                logPath = "",
+                pidPath = "",
+                launchMode = launchMode,
+            )
+        )
+        return probe.exitCode == 0 &&
+            probe.stdout.lineSequence().any { line ->
+                line.contains("cloudflared version", ignoreCase = true)
+            }
+    }
+
+    private fun probeBinaryVersion(selection: TunnelBinarySelection): TunnelShellResult {
+        val escapedBinaryPath = escapeForSingleQuotes(selection.path)
+        return when (selection.launchMode) {
+            TunnelLaunchMode.TERMUX -> runRootCommand("$runAsBinary $termuxPackageName '$escapedBinaryPath' --version", 15_000)
+            TunnelLaunchMode.ROOT -> runRootCommand("'$escapedBinaryPath' --version", 15_000)
+        }
     }
 
     private fun resolveDownloadSpec(): CloudflaredDownloadSpec {
@@ -1104,27 +1219,6 @@ internal object TunnelRuntime {
     }
 
     private fun escapeForSingleQuotes(value: String): String = value.replace("'", "'\"'\"'")
-
-    private fun runSelectionCommand(
-        selection: TunnelBinarySelection,
-        command: String,
-        timeoutMs: Long,
-    ): TunnelShellResult {
-        return when (selection.launchMode) {
-            TunnelLaunchMode.TERMUX -> runTermuxCommand(command, timeoutMs)
-            TunnelLaunchMode.ROOT -> runRootCommand(command, timeoutMs)
-        }
-    }
-
-    private fun runTermuxCommand(command: String, timeoutMs: Long): TunnelShellResult {
-        val fullCommand =
-            "export PREFIX='$termuxPrefix'; " +
-                "export HOME='$termuxHome'; " +
-                "export PATH='$termuxPrefix/bin:$termuxPrefix/bin/applets':\$PATH; " +
-                command
-        val wrapped = "run-as $termuxPackageName sh -c '${escapeForSingleQuotes(fullCommand)}'"
-        return runRootCommand(wrapped, timeoutMs)
-    }
 
     private fun runRootCommand(command: String, timeoutMs: Long): TunnelShellResult {
         return runCommandWithFallback(
