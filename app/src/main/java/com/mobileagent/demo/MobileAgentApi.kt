@@ -60,6 +60,7 @@ internal object MobileAgentRuntime {
 
     @Volatile
     private var latestSnapshot = NetworkSnapshot(
+        currentIpv4 = null,
         currentIpv6 = null,
         preferredNetworkLabel = "未连接",
         wifiConnected = false,
@@ -249,6 +250,47 @@ internal object MobileAgentRuntime {
                         )
                     }
 
+                    session.method == Method.GET && session.uri == "/api/proxy/nodes" -> {
+                        jsonResponse(
+                            JSONObject()
+                                .put("ok", true)
+                                .put("nodes", JSONArray().apply {
+                                    ProxyRuntime.listSnapshots().forEach { put(proxyNodeJson(it)) }
+                                })
+                        )
+                    }
+
+                    session.method == Method.POST && session.uri == "/api/proxy/start" -> {
+                        val body = parseJsonBody(session) ?: JSONObject()
+                        val config = parseProxyNodeConfig(body)
+                        val status = ProxyRuntime.start(config)
+                        jsonResponse(
+                            JSONObject()
+                                .put("ok", status.running)
+                                .put("node", proxyNodeJson(status))
+                                .put("error", status.lastError ?: JSONObject.NULL),
+                            status = if (status.running) Response.Status.OK else Response.Status.INTERNAL_ERROR,
+                        )
+                    }
+
+                    session.method == Method.POST && session.uri == "/api/proxy/stop" -> {
+                        val body = parseJsonBody(session) ?: JSONObject()
+                        val nodeId = body.optInt("id", -1)
+                        val status = ProxyRuntime.stop(nodeId)
+                        if (status == null) {
+                            jsonResponse(
+                                JSONObject().put("ok", false).put("error", "节点不存在"),
+                                status = Response.Status.NOT_FOUND,
+                            )
+                        } else {
+                            jsonResponse(
+                                JSONObject()
+                                    .put("ok", true)
+                                    .put("node", proxyNodeJson(status))
+                            )
+                        }
+                    }
+
                     (session.method == Method.GET || session.method == Method.POST) && session.uri == "/api/tunnel/start" -> {
                         jsonResponse(
                             JSONObject()
@@ -300,6 +342,9 @@ internal object MobileAgentRuntime {
                                 "POST /api/network/rotate",
                                 "GET /api/tasks",
                                 "GET /api/tasks/{taskId}",
+                                "GET /api/proxy/nodes",
+                                "POST /api/proxy/start",
+                                "POST /api/proxy/stop",
                                 "GET /api/tunnel/status",
                                 "GET /api/tunnel/start",
                                 "GET /api/tunnel/stop",
@@ -344,6 +389,7 @@ internal object MobileAgentRuntime {
     private fun snapshotJson(snapshot: NetworkSnapshot): JSONObject {
         return JSONObject()
             .put("activeNetwork", snapshot.preferredNetworkLabel)
+            .put("ipv4", snapshot.currentIpv4 ?: JSONObject.NULL)
             .put("ipv6", snapshot.currentIpv6 ?: JSONObject.NULL)
             .put("wifiConnected", snapshot.wifiConnected)
             .put("lastError", latestError ?: JSONObject.NULL)
@@ -377,6 +423,44 @@ internal object MobileAgentRuntime {
             .put("pid", status.pid ?: JSONObject.NULL)
             .put("lastError", status.lastError ?: JSONObject.NULL)
             .put("logLines", JSONArray(status.logLines))
+    }
+
+    private fun proxyNodeJson(status: ProxyNodeRuntimeSnapshot): JSONObject {
+        return JSONObject()
+            .put("id", status.id)
+            .put("name", status.name)
+            .put("type", status.type.name.lowercase())
+            .put("host", status.host)
+            .put("port", status.port)
+            .put("exitFamily", status.exitFamily.name.lowercase())
+            .put("running", status.running)
+            .put("currentConnections", status.currentConnections)
+            .put("startedAt", status.startedAt ?: JSONObject.NULL)
+            .put("lastError", status.lastError ?: JSONObject.NULL)
+    }
+
+    private fun parseProxyNodeConfig(body: JSONObject): ProxyNodeConfig {
+        val nodeType = when (body.optString("type").trim().lowercase()) {
+            "http" -> ProxyBackendType.HTTP
+            else -> ProxyBackendType.SOCKS5
+        }
+        val exitFamily = when (body.optString("exitFamily").trim().lowercase()) {
+            "ipv4" -> ProxyAddressFamily.IPV4
+            "ipv6" -> ProxyAddressFamily.IPV6
+            else -> ProxyAddressFamily.AUTO
+        }
+        val nodeId = body.optInt("id").takeIf { it > 0 } ?: ((System.currentTimeMillis() % Int.MAX_VALUE).toInt())
+        return ProxyNodeConfig(
+            id = nodeId,
+            name = body.optString("name").ifBlank { "代理节点-$nodeId" },
+            type = nodeType,
+            host = body.optString("host").ifBlank { "::" },
+            port = body.optInt("port").takeIf { it > 0 } ?: if (nodeType == ProxyBackendType.HTTP) 8080 else 1080,
+            exitFamily = exitFamily,
+            authEnabled = body.optBoolean("authEnabled", false),
+            username = body.optString("username"),
+            password = body.optString("password"),
+        )
     }
 
     private fun formatTime(timestamp: Long): String {

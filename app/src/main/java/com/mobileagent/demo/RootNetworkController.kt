@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit
 
 
 internal data class NetworkSnapshot(
+    val currentIpv4: String?,
     val currentIpv6: String?,
     val preferredNetworkLabel: String,
     val wifiConnected: Boolean,
@@ -119,25 +120,57 @@ internal class RootNetworkController {
 
     private fun refreshSnapshotBlocking(debugLog: MutableList<String>? = null, stage: String? = null): NetworkSnapshot {
         val activeNetwork = resolveActiveNetworkInfo()
+        val ipv4AddrResult = runNetworkCommand("ip -4 addr show", timeoutMs = 10_000)
+        val ipv4RouteResult = runNetworkCommand("ip -4 route show default", timeoutMs = 10_000)
         val addrResult = runNetworkCommand("ip -6 addr show", timeoutMs = 10_000)
         val routeResult = runNetworkCommand("ip -6 route show default", timeoutMs = 10_000)
+        val allIpv4Addresses = parseGlobalIpv4Addresses(ipv4AddrResult.stdout)
         val allAddresses = parseGlobalIpv6Addresses(addrResult.stdout)
+        val defaultIpv4Interface = parseDefaultInterface(ipv4RouteResult.stdout)
         val defaultInterface = parseDefaultInterface(routeResult.stdout)
+        val preferredIpv4 = selectPreferredAddress(
+            addresses = allIpv4Addresses.filterNot { isPrivateIpv4(it.address) },
+            activeInterface = activeNetwork.interfaceName,
+            defaultInterface = defaultIpv4Interface,
+        )
         val preferred = selectPreferredAddress(
             addresses = allAddresses,
             activeInterface = activeNetwork.interfaceName,
             defaultInterface = defaultInterface,
         )
         val details = buildList {
+            stage?.let { add("${it}：${summarizeCommand("IPv4 地址采集", ipv4AddrResult)}") }
+            stage?.let { add("${it}：${summarizeCommand("IPv4 默认路由", ipv4RouteResult)}") }
             stage?.let { add("${it}：${summarizeCommand("IPv6 地址采集", addrResult)}") }
             stage?.let { add("${it}：${summarizeCommand("默认路由", routeResult)}") }
             add("系统活跃网络：${activeNetwork.transportLabel}")
             add("系统活跃接口：${activeNetwork.interfaceName ?: "未识别"}")
             add(
+                if (defaultIpv4Interface.isNullOrBlank()) {
+                    "默认 IPv4 路由接口：未识别"
+                } else {
+                    "默认 IPv4 路由接口：$defaultIpv4Interface"
+                }
+            )
+            add(
                 if (defaultInterface.isNullOrBlank()) {
                     "默认 IPv6 路由接口：未识别"
                 } else {
                     "默认 IPv6 路由接口：${defaultInterface}"
+                }
+            )
+            add(
+                if (allIpv4Addresses.isEmpty()) {
+                    "候选 IPv4：未发现可用 IPv4"
+                } else {
+                    "候选 IPv4：${allIpv4Addresses.joinToString("；") { "${it.interfaceName}=${it.address}" }}"
+                }
+            )
+            add(
+                if (preferredIpv4 == null) {
+                    "最终选择 IPv4：未获取公网 IPv4"
+                } else {
+                    "最终选择 IPv4：${preferredIpv4.interfaceName} -> ${preferredIpv4.address}"
                 }
             )
             add(
@@ -157,10 +190,12 @@ internal class RootNetworkController {
         }
         debugLog?.addAll(details)
         return NetworkSnapshot(
+            currentIpv4 = preferredIpv4?.address,
             currentIpv6 = preferred?.address,
             preferredNetworkLabel = when {
                 activeNetwork.transportLabel != "未连接" -> activeNetwork.transportLabel
                 preferred != null -> interfaceToNetworkLabel(preferred.interfaceName)
+                preferredIpv4 != null -> interfaceToNetworkLabel(preferredIpv4.interfaceName)
                 else -> "未连接"
             },
             wifiConnected = activeNetwork.wifiConnected || allAddresses.any { it.interfaceName.lowercase().startsWith("wlan") },
@@ -295,6 +330,25 @@ internal class RootNetworkController {
         return results
     }
 
+    private fun parseGlobalIpv4Addresses(raw: String): List<InterfaceAddress> {
+        val interfaceRegex = Regex("^\\d+:\\s+([A-Za-z0-9_@.-]+):")
+        val ipv4Regex = Regex("inet\\s+((?:\\d{1,3}\\.){3}\\d{1,3})/\\d+\\s+scope\\s+global")
+        val results = mutableListOf<InterfaceAddress>()
+        var currentInterface: String? = null
+
+        raw.lineSequence().forEach { line ->
+            interfaceRegex.find(line.trim())?.let { match ->
+                currentInterface = match.groupValues[1].substringBefore('@')
+            }
+            val address = ipv4Regex.find(line)?.groupValues?.getOrNull(1)
+            if (address != null) {
+                currentInterface?.let { results += InterfaceAddress(it, address) }
+            }
+        }
+
+        return results
+    }
+
     private fun parseDefaultInterface(raw: String): String? {
         val devRegex = Regex("\\bdev\\s+([A-Za-z0-9_@.-]+)")
         return raw.lineSequence()
@@ -367,6 +421,15 @@ internal class RootNetworkController {
             else -> name
         }
     }
+
+    private fun isPrivateIpv4(address: String): Boolean {
+        return address.startsWith("10.") ||
+            address.startsWith("192.168.") ||
+            address.startsWith("127.") ||
+            address.startsWith("169.254.") ||
+            Regex("^172\\.(1[6-9]|2\\d|3[0-1])\\.").containsMatchIn(address) ||
+            Regex("^100\\.(6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])\\.").containsMatchIn(address)
+    }
 }
 
 private data class ShellResult(
@@ -385,4 +448,3 @@ private data class ActiveNetworkInfo(
     val transportLabel: String = "未连接",
     val wifiConnected: Boolean = false,
 )
-

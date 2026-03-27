@@ -18,11 +18,14 @@ What already exists:
 - root command execution for network inspection and airplane-mode based IP rotation
 - a bundled `cloudflared` ARM64 binary shipped inside the APK
 - a foreground-service based tunnel runner validated on a rooted real device
+- a minimal real proxy backend:
+  - SOCKS5 `CONNECT`
+  - HTTP proxy and HTTPS `CONNECT`
 
 What is not complete yet:
 
 - no boot-start implementation
-- no real SOCKS5 / HTTP proxy node backend yet; the "nodes" area is still mostly UI scaffolding
+- proxy nodes are still minimal and currently focus on basic forwarding rather than a full production proxy feature set
 - no CI, automated tests, or release pipeline
 
 ## Repository Layout
@@ -51,6 +54,9 @@ Implemented endpoints:
 - `POST /api/network/rotate`
 - `GET /api/tasks`
 - `GET /api/tasks/{taskId}`
+- `GET /api/proxy/nodes`
+- `POST /api/proxy/start`
+- `POST /api/proxy/stop`
 
 ## Development Notes
 

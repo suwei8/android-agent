@@ -123,6 +123,12 @@ private enum class NodeType(val label: String, val defaultPort: Int, val subtitl
     Http("HTTP", 8080, "适合浏览器和支持 HTTP 代理的软件"),
 }
 
+private enum class NodeExitFamily(val label: String, val subtitle: String) {
+    Auto("自动", "优先使用当前更可用的地址族"),
+    Ipv4("IPv4", "强制代理出站走 IPv4"),
+    Ipv6("IPv6", "强制代理出站走 IPv6"),
+}
+
 private enum class NodeStatus(val label: String, val color: Color) {
     Running("运行中", Color(0xFF1E8E3E)),
     Stopped("已停止", Color(0xFF6B7280)),
@@ -136,6 +142,7 @@ private data class ProxyNode(
     val type: NodeType,
     val host: String,
     val port: Int,
+    val exitFamily: NodeExitFamily,
     val authEnabled: Boolean,
     val username: String,
     val password: String,
@@ -154,6 +161,7 @@ private data class RotateTask(
 
 private data class NetworkState(
     val activeNetwork: String,
+    val ipv4: String,
     val ipv6: String,
     val wifiConnected: Boolean,
     val lastRotateAt: String,
@@ -189,6 +197,66 @@ private data class SettingsState(
     val auditLogs: Boolean,
 )
 
+private fun ProxyNode.toRuntimeConfig(): ProxyNodeConfig {
+    return ProxyNodeConfig(
+        id = id,
+        name = name,
+        type = when (type) {
+            NodeType.Socks5 -> ProxyBackendType.SOCKS5
+            NodeType.Http -> ProxyBackendType.HTTP
+        },
+        host = host,
+        port = port,
+        exitFamily = when (exitFamily) {
+            NodeExitFamily.Auto -> ProxyAddressFamily.AUTO
+            NodeExitFamily.Ipv4 -> ProxyAddressFamily.IPV4
+            NodeExitFamily.Ipv6 -> ProxyAddressFamily.IPV6
+        },
+        authEnabled = authEnabled,
+        username = username,
+        password = password,
+    )
+}
+
+private fun ProxyNode.applyRuntimeSnapshot(snapshot: ProxyNodeRuntimeSnapshot): ProxyNode {
+    return copy(
+        status = when {
+            snapshot.running -> NodeStatus.Running
+            !snapshot.lastError.isNullOrBlank() -> NodeStatus.Error
+            else -> NodeStatus.Stopped
+        },
+        currentConnections = snapshot.currentConnections,
+        lastStarted = when {
+            snapshot.running && snapshot.startedAt != null -> "已启动"
+            snapshot.startedAt != null -> "最近启动"
+            else -> "未启动"
+        },
+    )
+}
+
+private fun ProxyNode.accessHost(networkState: NetworkState): String? {
+    return when (exitFamily) {
+        NodeExitFamily.Ipv4 -> networkState.ipv4.takeIf { it.isNotBlank() && it != "未获取" }
+        NodeExitFamily.Ipv6 -> networkState.ipv6.takeIf { it.isNotBlank() && it != "未获取" }
+        NodeExitFamily.Auto -> networkState.ipv6.takeIf { it.isNotBlank() && it != "未获取" }
+            ?: networkState.ipv4.takeIf { it.isNotBlank() && it != "未获取" }
+    }
+}
+
+private fun ProxyNode.accessAddressLabel(networkState: NetworkState): String {
+    val host = accessHost(networkState) ?: return "当前未获取可用公网地址"
+    return if (host.contains(':')) "[${host}]:$port" else "$host:$port"
+}
+
+private fun NetworkState.publicHostFor(family: NodeExitFamily): String? {
+    fun String.availableValue(): String? = takeIf { it.isNotBlank() && it != "未获取" }
+    return when (family) {
+        NodeExitFamily.Ipv4 -> ipv4.availableValue()
+        NodeExitFamily.Ipv6 -> ipv6.availableValue()
+        NodeExitFamily.Auto -> ipv6.availableValue() ?: ipv4.availableValue()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MobileAgentDemoApp() {
@@ -206,6 +274,7 @@ private fun MobileAgentDemoApp() {
         mutableStateOf(
             NetworkState(
                 activeNetwork = "检测中",
+                ipv4 = "未获取",
                 ipv6 = "获取中...",
                 wifiConnected = false,
                 lastRotateAt = "未执行",
@@ -321,9 +390,14 @@ private fun MobileAgentDemoApp() {
         val runtimeTasks = MobileAgentRuntime.listTasks().map { it.toUiTask() }
         tasks.clear()
         tasks.addAll(runtimeTasks)
+        nodes.indices.toList().forEach { index ->
+            val node = nodes[index]
+            nodes[index] = node.applyRuntimeSnapshot(ProxyRuntime.snapshotFor(node.toRuntimeConfig()))
+        }
         val latestTask = runtimeTasks.firstOrNull()
         networkState = networkState.copy(
             activeNetwork = snapshot.preferredNetworkLabel,
+            ipv4 = snapshot.currentIpv4 ?: "未获取",
             ipv6 = snapshot.currentIpv6 ?: "未获取",
             wifiConnected = snapshot.wifiConnected,
             lastRotateAt = when (latestTask?.status) {
@@ -437,25 +511,36 @@ private fun MobileAgentDemoApp() {
 
                 onNewNode = { showCreateNodeDialog = true },
                 onCopyIp = {
-                    clipboard.setText(AnnotatedString(networkState.ipv6))
-                    toast("当前 IPv6 已复制")
+                    val target = networkState.ipv6.takeIf { it != "未获取" } ?: networkState.ipv4
+                    clipboard.setText(AnnotatedString(target))
+                    toast("当前入口地址已复制")
                 }
             )
 
             AppTab.Nodes -> NodesScreen(
                 modifier = Modifier.padding(innerPadding),
                 nodes = nodes,
+                networkState = networkState,
                 onNodeClick = { selectedNode = it },
                 onStartNode = { node ->
-                    updateNode(node.copy(status = NodeStatus.Running, lastStarted = "刚刚"))
-                    toast("${node.name} 已启动")
+                    scope.launch {
+                        val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
+                        updateNode(node.applyRuntimeSnapshot(snapshot))
+                        selectedNode = selectedNode?.takeIf { it.id == node.id }?.applyRuntimeSnapshot(snapshot)
+                        toast(if (snapshot.running) "${node.name} 已启动" else (snapshot.lastError ?: "${node.name} 启动失败"))
+                    }
                 },
                 onStopNode = { node ->
-                    updateNode(node.copy(status = NodeStatus.Stopped, currentConnections = 0))
-                    toast("${node.name} 已停止")
+                    scope.launch {
+                        val snapshot = ProxyRuntime.stop(node.id)
+                        val updated = if (snapshot != null) node.applyRuntimeSnapshot(snapshot) else node.copy(status = NodeStatus.Stopped, currentConnections = 0)
+                        updateNode(updated)
+                        selectedNode = selectedNode?.takeIf { it.id == node.id }?.copy(status = updated.status, currentConnections = updated.currentConnections, lastStarted = updated.lastStarted)
+                        toast("${node.name} 已停止")
+                    }
                 },
                 onCopyAddress = { node ->
-                    clipboard.setText(AnnotatedString("[${node.host}]:${node.port}"))
+                    clipboard.setText(AnnotatedString(node.accessAddressLabel(networkState)))
                     toast("访问地址已复制")
                 }
             )
@@ -548,11 +633,17 @@ private fun MobileAgentDemoApp() {
 
     if (showCreateNodeDialog) {
         CreateNodeDialog(
+            networkState = networkState,
             onDismiss = { showCreateNodeDialog = false },
             onCreate = { node ->
-                nodes.add(0, node)
+                val pendingNode = node.copy(status = NodeStatus.Starting, lastStarted = "启动中")
+                nodes.add(0, pendingNode)
                 showCreateNodeDialog = false
-                toast("节点已创建并开始监听")
+                scope.launch {
+                    val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
+                    updateNode(node.applyRuntimeSnapshot(snapshot))
+                    toast(if (snapshot.running) "节点已创建并开始监听" else (snapshot.lastError ?: "节点启动失败"))
+                }
             },
             nextId = (nodes.maxOfOrNull { it.id } ?: 0) + 1,
         )
@@ -561,17 +652,28 @@ private fun MobileAgentDemoApp() {
     selectedNode?.let { node ->
         NodeDetailDialog(
             node = node,
+            networkState = networkState,
             onDismiss = { selectedNode = null },
             onStart = {
-                updateNode(node.copy(status = NodeStatus.Running, lastStarted = "刚刚"))
-                selectedNode = node.copy(status = NodeStatus.Running, lastStarted = "刚刚")
+                scope.launch {
+                    val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
+                    val updated = node.applyRuntimeSnapshot(snapshot)
+                    updateNode(updated)
+                    selectedNode = updated
+                    toast(if (snapshot.running) "${node.name} 已启动" else (snapshot.lastError ?: "${node.name} 启动失败"))
+                }
             },
             onStop = {
-                updateNode(node.copy(status = NodeStatus.Stopped, currentConnections = 0))
-                selectedNode = node.copy(status = NodeStatus.Stopped, currentConnections = 0)
+                scope.launch {
+                    val snapshot = ProxyRuntime.stop(node.id)
+                    val updated = if (snapshot != null) node.applyRuntimeSnapshot(snapshot) else node.copy(status = NodeStatus.Stopped, currentConnections = 0)
+                    updateNode(updated)
+                    selectedNode = updated
+                    toast("${node.name} 已停止")
+                }
             },
             onCopy = {
-                clipboard.setText(AnnotatedString("[${node.host}]:${node.port}"))
+                clipboard.setText(AnnotatedString(node.accessAddressLabel(networkState)))
                 toast("节点地址已复制")
             }
         )
@@ -605,7 +707,7 @@ private fun OverviewScreen(
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         FilledTonalButton(onClick = onNewNode) { Text("新建节点") }
                         Button(onClick = onQuickRotate) { Text("一键换 IP") }
-                        OutlinedButton(onClick = onCopyIp) { Text("复制当前 IPv6") }
+                        OutlinedButton(onClick = onCopyIp) { Text("复制当前入口地址") }
                     }
                 }
             }
@@ -619,9 +721,10 @@ private fun OverviewScreen(
             }
         }
         item {
-            SectionTitle(title = "当前出口 IP", subtitle = "远程设备访问前，先确认手机当前 IPv6")
+            SectionTitle(title = "当前出口地址", subtitle = "创建节点前先确认手机当前公网 IPv4 / IPv6")
             KeyValueCard(
                 pairs = listOf(
+                    "当前 IPv4" to networkState.ipv4,
                     "IPv6 地址" to networkState.ipv6,
                     "换 IP 方式" to networkState.rotateMode,
                     "最近切换" to networkState.lastRotateAt,
@@ -653,6 +756,7 @@ private fun OverviewScreen(
 private fun NodesScreen(
     modifier: Modifier = Modifier,
     nodes: List<ProxyNode>,
+    networkState: NetworkState,
     onNodeClick: (ProxyNode) -> Unit,
     onStartNode: (ProxyNode) -> Unit,
     onStopNode: (ProxyNode) -> Unit,
@@ -662,7 +766,7 @@ private fun NodesScreen(
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("还没有代理节点", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("创建一个 SOCKS5 或 HTTP 代理节点，让其他设备通过这台手机访问网络")
+                Text("创建一个 SOCKS5 或 HTTP 代理节点，并为它指定 IPv4、IPv6 或自动出口策略")
             }
         }
         return
@@ -688,7 +792,7 @@ private fun NodesScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(node.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text(
-                                text = "${node.type.label} · [${node.host}]:${node.port}",
+                                text = "${node.type.label} · ${node.accessAddressLabel(networkState)}",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -698,6 +802,7 @@ private fun NodesScreen(
                     }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         TinyInfoChip(icon = Icons.Default.Lock, label = if (node.authEnabled) "已开启认证" else "匿名访问")
+                        TinyInfoChip(icon = Icons.Default.Language, label = "出口 ${node.exitFamily.label}")
                         TinyInfoChip(icon = Icons.Default.Sync, label = "连接 ${node.currentConnections}")
                         TinyInfoChip(icon = Icons.Default.PowerSettingsNew, label = "最近启动 ${node.lastStarted}")
                     }
@@ -743,6 +848,7 @@ private fun NetworkScreen(
             KeyValueCard(
                 pairs = listOf(
                     "当前网络" to networkState.activeNetwork,
+                    "当前 IPv4" to networkState.ipv4,
                     "当前 IPv6" to networkState.ipv6,
                     "无线网络状态" to if (networkState.wifiConnected) "已连接" else "未连接",
                     "上次换 IP" to networkState.lastRotateAt,
@@ -894,6 +1000,9 @@ private fun RemoteScreen(
                     Text("网络状态：GET /api/network/status", style = MaterialTheme.typography.bodySmall)
                     Text("切换出口：POST /api/network/rotate", style = MaterialTheme.typography.bodySmall)
                     Text("任务详情：GET /api/tasks/{taskId}", style = MaterialTheme.typography.bodySmall)
+                    Text("代理列表：GET /api/proxy/nodes", style = MaterialTheme.typography.bodySmall)
+                    Text("启动代理：POST /api/proxy/start", style = MaterialTheme.typography.bodySmall)
+                    Text("停止代理：POST /api/proxy/stop", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -963,6 +1072,7 @@ private fun SettingsScreen(
 
 @Composable
 private fun CreateNodeDialog(
+    networkState: NetworkState,
     nextId: Int,
     onDismiss: () -> Unit,
     onCreate: (ProxyNode) -> Unit,
@@ -970,10 +1080,12 @@ private fun CreateNodeDialog(
     var name by remember { mutableStateOf("手机代理-$nextId") }
     var type by remember { mutableStateOf(NodeType.Socks5) }
     var port by remember { mutableStateOf(type.defaultPort.toString()) }
+    var exitFamily by remember { mutableStateOf(NodeExitFamily.Auto) }
     var authEnabled by remember { mutableStateOf(true) }
     var username by remember { mutableStateOf("agent") }
     var password by remember { mutableStateOf("12345678") }
     var showPassword by remember { mutableStateOf(false) }
+    val accessPreview = networkState.publicHostFor(exitFamily) ?: "未获取"
 
     LaunchedEffect(type) {
         port = type.defaultPort.toString()
@@ -1005,7 +1117,31 @@ private fun CreateNodeDialog(
                         }
                     }
                 }
-                OutlinedTextField(value = "::", onValueChange = {}, enabled = false, label = { Text("监听地址") }, modifier = Modifier.fillMaxWidth())
+                Text("出口地址协议族", fontWeight = FontWeight.SemiBold)
+                NodeExitFamily.entries.forEach { item ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { exitFamily = item }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.RadioButton(selected = exitFamily == item, onClick = { exitFamily = item })
+                        Column {
+                            Text(item.label, fontWeight = FontWeight.SemiBold)
+                            Text(item.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = if (accessPreview.contains(':')) "[${accessPreview}]" else accessPreview,
+                    onValueChange = {},
+                    enabled = false,
+                    label = { Text("当前对外访问地址") },
+                    supportingText = { Text("节点会监听全接口，对外展示地址按所选出口协议族实时取当前公网 IP") },
+                    modifier = Modifier.fillMaxWidth()
+                )
                 OutlinedTextField(
                     value = port,
                     onValueChange = { port = it.filter(Char::isDigit) },
@@ -1039,14 +1175,15 @@ private fun CreateNodeDialog(
                             id = nextId,
                             name = name.ifBlank { "手机代理-$nextId" },
                             type = type,
-                            host = "::",
+                            host = accessPreview.takeIf { it != "未获取" } ?: "::",
                             port = port.toIntOrNull() ?: type.defaultPort,
+                            exitFamily = exitFamily,
                             authEnabled = authEnabled,
                             username = username,
                             password = password,
-                            status = NodeStatus.Running,
+                            status = NodeStatus.Stopped,
                             currentConnections = 0,
-                            lastStarted = "刚刚",
+                            lastStarted = "未启动",
                         )
                     )
                 }
@@ -1063,6 +1200,7 @@ private fun CreateNodeDialog(
 @Composable
 private fun NodeDetailDialog(
     node: ProxyNode,
+    networkState: NetworkState,
     onDismiss: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
@@ -1074,11 +1212,12 @@ private fun NodeDetailDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("${node.type.label} · 监听于 [${node.host}]:${node.port}", modifier = Modifier.weight(1f))
+                    Text("${node.type.label} · ${node.accessAddressLabel(networkState)}", modifier = Modifier.weight(1f))
                     StatusBadge(label = node.status.label, color = node.status.color)
                 }
                 HorizontalDivider()
-
+                Text("监听方式：全接口监听")
+                Text("出口协议族：${node.exitFamily.label}")
                 Text("访问认证：${if (node.authEnabled) "已开启" else "未开启"}")
                 if (node.authEnabled) {
                     Text("用户名：${node.username}")
@@ -1086,7 +1225,7 @@ private fun NodeDetailDialog(
                 }
                 Text("当前连接：${node.currentConnections}")
                 Text("最近启动：${node.lastStarted}")
-                Text("请确认当前网络环境允许通过手机 IPv6 访问此端口", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("请确认当前公网入口地址已变化时，同步使用最新的 IPv4 或 IPv6 地址访问此节点", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
         confirmButton = {
@@ -1266,6 +1405,7 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         type = NodeType.Socks5,
         host = "::",
         port = 1080,
+        exitFamily = NodeExitFamily.Auto,
         authEnabled = true,
         username = "agent",
         password = "12345678",
@@ -1279,6 +1419,7 @@ private fun sampleNodes(): List<ProxyNode> = listOf(
         type = NodeType.Http,
         host = "::",
         port = 8080,
+        exitFamily = NodeExitFamily.Auto,
         authEnabled = true,
         username = "browser",
         password = "87654321",
