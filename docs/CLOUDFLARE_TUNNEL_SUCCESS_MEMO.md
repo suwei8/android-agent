@@ -1,145 +1,82 @@
-# Cloudflare Tunnel 修复成功备忘录
+# Cloudflare Tunnel 成功备忘录
 
 日期：2026-03-27
 
 ## 结论
 
-本次修复后，真机已可成功启动 Cloudflare Tunnel，并可从公网访问手机本地控制 API。
+当前可稳定工作的链路是：
 
-已验证地址：
+- APK 内置 `arm64-v8a/libcloudflared.so`
+- App 内本地 API：`127.0.0.1:18080`
+- App 前台服务触发 root 启动
+- Cloudflare Tunnel 对外暴露：`https://android-agent.555606.xyz/api/health`
 
-- `https://android-agent.555606.xyz/api/health`
+真机实测结果：
 
-成功返回：
+- `POST /api/tunnel/start` 后，`GET /api/tunnel/status` 返回 `statusLabel=已连接`
+- 公网访问 `https://android-agent.555606.xyz/api/health` 返回 `HTTP/2 200`
 
-```json
-{
-  "ok": true,
-  "server": {
-    "running": true,
-    "host": "127.0.0.1",
-    "port": 18080,
-    "localApi": "127.0.0.1:18080",
-    "lastError": null
-  }
-}
-```
+## 关键发现
 
-## 本次问题背景
+问题不在二进制本身。
 
-最初失败日志显示 `cloudflared` 在 Android 上启动后会访问 `[::1]:53` 做 DNS 解析，并出现如下错误：
+同一份 `cloudflared` 二进制在真机上手工执行可以成功连通，失败点在于 App 内部的启动方式。
 
-- `lookup _v2-origintunneld._tcp.argotunnel.com on [::1]:53: read udp [::1]:...->[::1]:53: read: connection refused`
+已经证实的事实：
 
-这说明隧道启动阶段存在 DNS 解析问题，导致用户在点击“启动隧道”时看到启动失败。
+- 手工执行 APK 内置路径的 `libcloudflared.so` 可以成功注册多条 `Registered tunnel connection`
+- 公网 `api/health` 可以命中手机本地 API
+- 旧的长驻交互式 root shell 启动方式会把问题复杂化
 
-## 本次代码修改
+## 当前实现
 
-### 1. AndroidManifest
+当前 `TunnelRuntime` 使用的方案：
 
-文件：
+- 二进制来源固定为 APK `nativeLibraryDir` 下的 `libcloudflared.so`
+- 启动参数固定包含：
+  - `tunnel --no-autoupdate run`
+  - `--dns-resolver-addrs 1.1.1.1:53`
+  - `--dns-resolver-addrs 8.8.8.8:53`
+- Tunnel 由前台服务触发
+- root 启动改为一次性命令执行，而不是长驻交互式 shell
+- 启动时按策略链尝试：
+  - `su -c`
+  - `su -M -c`
+  - `su -t <adbd-pid> -c`
+  - `su -M -t <adbd-pid> -c`
 
-- `app/src/main/AndroidManifest.xml`
+## 真机验证
 
-新增内容：
+验证设备：
 
-- `com.termux.permission.RUN_COMMAND`
-- `queries` 中声明 `com.termux`
+- `XT2175_2`
+- `arm64-v8a`
+- Root 已开启
 
-目的：
+验证步骤：
 
-- 为后续通过 Termux 官方 `RunCommandService` 启动 `cloudflared` 预留权限和包可见性
+1. 安装 debug APK
+2. 打开应用，确认本地 API 正常
+3. 调用 `POST /api/tunnel/start`
+4. 检查 `GET /api/tunnel/status`
+5. 检查公网 `https://android-agent.555606.xyz/api/health`
 
-### 2. TunnelRuntime
+成功判据：
 
-文件：
+- `statusLabel=已连接`
+- 日志中出现 `Registered tunnel connection`
+- 公网请求返回 `HTTP/2 200`
 
-- `app/src/main/java/com/mobileagent/demo/TunnelRuntime.kt`
+## 说明
 
-主要修改点：
+日志里偶尔仍可能看到针对 `[::1]:53` 的 DNS 报错片段，但它不再阻断当前成功链路。判断是否真正成功，应以以下事实为准：
 
-- 调整 binary 选择与探测逻辑
-- 增加 bundled binary 可执行性探测
-- 增加 Termux binary 可用性探测
-- 增加 Termux `RUN_COMMAND` service 启动实现
-- 增加 Termux 权限检查与 `allow-external-apps` 配置检查
-- 移除旧的 `runTermuxCommand()` 包装逻辑
+- Tunnel 进程仍在运行
+- `statusLabel=已连接`
+- 公网健康检查返回 `HTTP/2 200`
 
-## 真机验证结果
+## 当前建议
 
-### 1. APK
-
-已构建并安装 debug APK 到真机：
-
-- 设备：`XT2175_2`
-- 包名：`com.mobileagent.demo`
-
-### 2. 隧道实际成功状态
-
-最终成功日志来自 bundled binary：
-
-- 日志文件：`/data/local/tmp/mobile-agent-cloudflared.log`
-- pid 文件：`/data/local/tmp/mobile-agent-cloudflared.pid`
-
-关键成功日志包含：
-
-- `Registered tunnel connection`
-- `Updated to new configuration`
-
-说明：
-
-- 本次最终公网打通时，实际运行的是应用内 bundled `cloudflared`
-- Termux 相关支持已补齐，但本次最终打通链路并不是依赖 Termux log 文件完成验证
-
-### 3. 外网验证
-
-已确认以下请求成功命中手机本地 API：
-
-- `curl https://android-agent.555606.xyz/api/health`
-
-返回结果中的 `localApi` 为：
-
-- `127.0.0.1:18080`
-
-说明 Cloudflare Tunnel 已正确把公网域名流量转发到手机本地服务。
-
-## 设备侧补充处理
-
-为支持 Termux 备用方案，本次还在真机上做了两项配置：
-
-- 给 `com.mobileagent.demo` 授予 `com.termux.permission.RUN_COMMAND`
-- 在 Termux `termux.properties` 中启用 `allow-external-apps = true`
-
-备注：
-
-- 这两项是 Termux service 方案的前置条件
-- 即使本次最终成功使用的是 bundled binary，这些配置也保留了后续切换或回退空间
-
-## 当前状态判断
-
-当前可以认为“启动隧道”问题已修复，依据如下：
-
-- APK 已重新构建并安装
-- 真机上 `cloudflared` 进程已启动
-- 隧道日志已出现多条 `Registered tunnel connection`
-- 公网域名已成功访问到本地 API
-
-## 后续建议
-
-建议后续继续做两件事：
-
-1. 把 UI 中的 binary source 展示与真实运行路径做一次一致性核对，避免界面与实际启动源不一致。
-2. 在 `TunnelRuntime` 增加更明确的成功判定与失败归因，区分：
-   - bundled DNS 失败
-   - Termux 权限缺失
-   - Termux `allow-external-apps` 未开启
-   - UI 触发成功但状态刷新滞后
-
-## 风险备注
-
-本次验证过程中，真机 ADB 连接在 `uiautomator dump` 等操作时存在多次 `offline` 现象。因此最终成功确认主要基于以下事实，而不是仅依赖 UI 截图：
-
-- 真机日志
-- `cloudflared` 进程状态
-- 公网 `api/health` 实测返回
-
+- 后续开发以当前 APK 内置二进制链路为准
+- 不再把 Termux 作为产品默认依赖
+- 文档和 UI 一律以“APK 内置 native 二进制 + root 前台服务”表述为准

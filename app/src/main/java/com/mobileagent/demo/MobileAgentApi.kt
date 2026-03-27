@@ -72,7 +72,11 @@ internal object MobileAgentRuntime {
     @Volatile
     private var latestError: String? = null
 
+    @Volatile
+    private var appContext: Context? = null
+
     fun bindContext(context: Context) {
+        appContext = context.applicationContext
         controller.bindContext(context.applicationContext)
     }
 
@@ -120,6 +124,10 @@ internal object MobileAgentRuntime {
     fun getLatestDiagnostics(): List<String> = latestDiagnostics
 
     fun getLatestError(): String? = latestError
+
+    fun requireContext(): Context {
+        return appContext ?: error("应用上下文尚未绑定。")
+    }
 
     fun listTasks(limit: Int = 20): List<ApiTaskRecord> = synchronized(taskLock) {
         tasks.values.toList().sortedByDescending { it.createdAt }.take(limit)
@@ -232,6 +240,43 @@ internal object MobileAgentRuntime {
                             })
                     )
 
+                    session.method == Method.GET && session.uri == "/api/tunnel/status" -> {
+                        val status = runBlocking { TunnelRuntime.refreshStatus(requireContext(), lastErrorOverride = null) }
+                        jsonResponse(
+                            JSONObject()
+                                .put("ok", true)
+                                .put("tunnel", tunnelJson(status))
+                        )
+                    }
+
+                    (session.method == Method.GET || session.method == Method.POST) && session.uri == "/api/tunnel/start" -> {
+                        jsonResponse(
+                            JSONObject()
+                                .put("ok", true)
+                                .put("queued", true)
+                                .put("message", "隧道启动任务已提交")
+                        ).also {
+                            val context = requireContext()
+                            scope.launch {
+                                TunnelRuntime.start(context)
+                            }
+                        }
+                    }
+
+                    (session.method == Method.GET || session.method == Method.POST) && session.uri == "/api/tunnel/stop" -> {
+                        jsonResponse(
+                            JSONObject()
+                                .put("ok", true)
+                                .put("queued", true)
+                                .put("message", "隧道停止任务已提交")
+                        ).also {
+                            val context = requireContext()
+                            scope.launch {
+                                TunnelRuntime.stop(context)
+                            }
+                        }
+                    }
+
                     session.method == Method.GET && session.uri.startsWith("/api/tasks/") -> {
                         val taskId = session.uri.removePrefix("/api/tasks/")
                         val task = getTask(taskId)
@@ -255,6 +300,11 @@ internal object MobileAgentRuntime {
                                 "POST /api/network/rotate",
                                 "GET /api/tasks",
                                 "GET /api/tasks/{taskId}",
+                                "GET /api/tunnel/status",
+                                "GET /api/tunnel/start",
+                                "GET /api/tunnel/stop",
+                                "POST /api/tunnel/start",
+                                "POST /api/tunnel/stop",
                             ))),
                         status = Response.Status.NOT_FOUND,
                     )
@@ -311,6 +361,22 @@ internal object MobileAgentRuntime {
             .put("oldIpv6", task.oldIpv6 ?: JSONObject.NULL)
             .put("newIpv6", task.newIpv6 ?: JSONObject.NULL)
             .put("debugLines", JSONArray(task.debugLines))
+    }
+
+    private fun tunnelJson(status: TunnelStatusSnapshot): JSONObject {
+        return JSONObject()
+            .put("tokenBound", status.tokenBound)
+            .put("running", status.running)
+            .put("statusLabel", status.statusLabel)
+            .put("domain", status.domain)
+            .put("binaryPath", status.binaryPath)
+            .put("binaryReady", status.binaryReady)
+            .put("binaryVersion", status.binaryVersion ?: JSONObject.NULL)
+            .put("downloadStatus", status.downloadStatus)
+            .put("deviceAbi", status.deviceAbi)
+            .put("pid", status.pid ?: JSONObject.NULL)
+            .put("lastError", status.lastError ?: JSONObject.NULL)
+            .put("logLines", JSONArray(status.logLines))
     }
 
     private fun formatTime(timestamp: Long): String {

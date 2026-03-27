@@ -171,8 +171,6 @@ private data class RemoteState(
 
     val domain: String,
     val localApi: String,
-    val autoReconnect: Boolean,
-    val autoStart: Boolean,
     val lastError: String?,
     val binaryPath: String,
     val binaryReady: Boolean,
@@ -229,13 +227,11 @@ private fun MobileAgentDemoApp() {
 
                 domain = "未配置",
                 localApi = "127.0.0.1:18080",
-                autoReconnect = true,
-                autoStart = true,
                 lastError = null,
-                binaryPath = "/data/local/tmp/cloudflared",
+                binaryPath = "检测中",
                 binaryReady = false,
                 binaryVersion = null,
-                downloadStatus = "待下载",
+                downloadStatus = "APK 内置二进制待检测",
                 deviceAbi = "检测中",
                 pid = null,
                 logLines = emptyList(),
@@ -395,7 +391,7 @@ private fun MobileAgentDemoApp() {
                 title = {
                     Text(
                         text = when (AppTab.entries[selectedTab]) {
-                            AppTab.Overview -> "Mobile Agent Demo"
+                            AppTab.Overview -> "移动代理"
                             AppTab.Nodes -> "代理节点"
                             AppTab.Network -> "网络控制"
                             AppTab.Remote -> "远程管理"
@@ -500,14 +496,14 @@ private fun MobileAgentDemoApp() {
                     scope.launch {
                         val status = TunnelRuntime.bind(context, remoteTokenInput, remoteDomainInput)
                         applyTunnelStatus(status)
-                        snackbarHostState.showSnackbar("Tunnel Token 已保存")
+                        snackbarHostState.showSnackbar("隧道配置已保存")
                     }
                 },
                 onDownload = {
                     scope.launch {
-                        val status = TunnelRuntime.downloadBinary(context, force = true)
+                        val status = TunnelRuntime.prepareBundledBinary(context)
                         applyTunnelStatus(status)
-                        snackbarHostState.showSnackbar(if (status.binaryReady) "Android 版 cloudflared 已安装" else (status.lastError ?: "cloudflared 下载失败"))
+                        snackbarHostState.showSnackbar(if (status.binaryReady) "内置 cloudflared 已就绪" else (status.lastError ?: "内置 cloudflared 检测失败"))
 
                     }
                 },
@@ -605,7 +601,7 @@ private fun OverviewScreen(
             ) {
                 Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("手机版 3x-ui 控制台", color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("管理代理节点、远程隧道和换 IP 任务，当前 UI 为可交互 Demo。", color = Color(0xFFD0D5DD))
+                    Text("管理代理节点、远程隧道和换 IP 任务，当前界面已接入真实控制链路。", color = Color(0xFFD0D5DD))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         FilledTonalButton(onClick = onNewNode) { Text("新建节点") }
                         Button(onClick = onQuickRotate) { Text("一键换 IP") }
@@ -666,7 +662,7 @@ private fun NodesScreen(
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("还没有代理节点", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("创建一个 SOCKS5 或 HTTP 节点，让其他设备通过这台手机访问网络")
+                Text("创建一个 SOCKS5 或 HTTP 代理节点，让其他设备通过这台手机访问网络")
             }
         }
         return
@@ -748,7 +744,7 @@ private fun NetworkScreen(
                 pairs = listOf(
                     "当前网络" to networkState.activeNetwork,
                     "当前 IPv6" to networkState.ipv6,
-                    "Wi‑Fi 状态" to if (networkState.wifiConnected) "已连接" else "未连接",
+                    "无线网络状态" to if (networkState.wifiConnected) "已连接" else "未连接",
                     "上次换 IP" to networkState.lastRotateAt,
                     "最近错误" to (networkState.lastError ?: "无"),
                 )
@@ -758,7 +754,7 @@ private fun NetworkScreen(
             Card(shape = RoundedCornerShape(22.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("更换出口 IP", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("执行期间网络会短暂中断；现在会展示 root 命令、默认路由和 IPv6 采集诊断")
+                    Text("执行期间网络会短暂中断；界面会展示 root 命令、默认路由和 IPv6 采集诊断")
 
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         TinyInfoChip(icon = Icons.Default.SwapHoriz, label = networkState.rotateMode)
@@ -773,7 +769,7 @@ private fun NetworkScreen(
             }
         }
         item {
-            SectionTitle(title = "最近诊断", subtitle = "用于定位 root、飞行模式和 IPv6 恢复问题")
+            SectionTitle(title = "最近诊断", subtitle = "用于定位 root 权限、飞行模式和 IPv6 恢复问题")
         }
         item {
             DiagnosticsCard(
@@ -836,7 +832,7 @@ private fun RemoteScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
-            SectionTitle(title = "Cloudflare Tunnel", subtitle = "控制面走 Tunnel，数据面仍由本地代理节点承载")
+            SectionTitle(title = "Cloudflare Tunnel", subtitle = "远程入口走 Tunnel，实际流量仍由本地代理节点承载")
         }
         item {
             Card(shape = RoundedCornerShape(22.dp)) {
@@ -844,8 +840,8 @@ private fun RemoteScreen(
                     OutlinedTextField(
                         value = remoteTokenInput,
                         onValueChange = onTokenChange,
-                        label = { Text("Tunnel Token") },
-                        supportingText = { Text("保存 token 后，首次启动会自动下载并安装 Android 版 cloudflared") },
+                        label = { Text("隧道令牌") },
+                        supportingText = { Text("当前版本使用 APK 内置 arm64 二进制，并通过 root 前台服务启动 Cloudflare Tunnel") },
 
                         modifier = Modifier.fillMaxWidth(),
                         maxLines = 3
@@ -861,7 +857,7 @@ private fun RemoteScreen(
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = onBind) { Text("保存配置") }
-                        OutlinedButton(onClick = onDownload) { Text("下载/更新") }
+                        OutlinedButton(onClick = onDownload) { Text("检测内置") }
                         OutlinedButton(onClick = onRefresh) { Text("刷新状态") }
                     }
 
@@ -875,15 +871,13 @@ private fun RemoteScreen(
                     "进程状态" to if (remoteState.running) "运行中" else "未运行",
                     "访问域名" to remoteState.domain,
 
-                    "本地 API" to remoteState.localApi,
-                    "设备 ABI" to remoteState.deviceAbi,
+                    "本地控制接口" to remoteState.localApi,
+                    "设备架构" to remoteState.deviceAbi,
                     "二进制路径" to remoteState.binaryPath,
-                    "二进制状态" to if (remoteState.binaryReady) "已就绪" else "未安装",
-                    "下载状态" to remoteState.downloadStatus,
+                    "二进制状态" to if (remoteState.binaryReady) "已就绪" else "未就绪",
+                    "运行说明" to remoteState.downloadStatus,
                     "当前版本" to (remoteState.binaryVersion ?: "未知"),
-                    "进程 PID" to (remoteState.pid ?: "未运行"),
-                    "自动重连" to if (remoteState.autoReconnect) "已开启" else "已关闭",
-                    "开机启动" to if (remoteState.autoStart) "已开启" else "已关闭",
+                    "进程号" to (remoteState.pid ?: "未运行"),
                     "最近错误" to (remoteState.lastError ?: "无"),
                 )
             )
@@ -892,14 +886,14 @@ private fun RemoteScreen(
         item {
             Card(shape = RoundedCornerShape(22.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("本地控制 API", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("cloudflared 会把域名请求转发到手机上的本地 API；若未安装，启动时会先自动下载应用内 Android 版", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("本地控制接口", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("cloudflared 会把域名请求转发到手机本地控制接口；当前版本直接使用 APK 内置二进制，不依赖 Termux。", color = MaterialTheme.colorScheme.onSurfaceVariant)
 
 
-                    Text("GET  /api/health", style = MaterialTheme.typography.bodySmall)
-                    Text("GET  /api/network/status", style = MaterialTheme.typography.bodySmall)
-                    Text("POST /api/network/rotate", style = MaterialTheme.typography.bodySmall)
-                    Text("GET  /api/tasks/{taskId}", style = MaterialTheme.typography.bodySmall)
+                    Text("健康检查：GET /api/health", style = MaterialTheme.typography.bodySmall)
+                    Text("网络状态：GET /api/network/status", style = MaterialTheme.typography.bodySmall)
+                    Text("切换出口：POST /api/network/rotate", style = MaterialTheme.typography.bodySmall)
+                    Text("任务详情：GET /api/tasks/{taskId}", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -1306,7 +1300,7 @@ private fun sampleTasks(): List<RotateTask> = listOf(
         id = "tun-001",
         title = "绑定远程隧道",
         status = "已成功",
-        detail = "Cloudflare Tunnel 已连接到本地 API 127.0.0.1:18080",
+        detail = "Cloudflare Tunnel 已连接到本地控制接口 127.0.0.1:18080",
     ),
     RotateTask(
         id = "xray-001",

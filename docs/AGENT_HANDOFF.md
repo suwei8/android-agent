@@ -1,5 +1,9 @@
 # Agent Handoff
 
+> Historical note:
+> This handoff reflects an earlier failed investigation stage and is no longer the current implementation guide.
+> It still mentions Termux fallback and emulator-first validation, both of which are no longer the active path.
+
 ## Purpose of This Handoff
 
 This document is for the next agent who will continue development on a Linux ARM64 server and primarily use an Android emulator first, then return to a real rooted phone for final validation.

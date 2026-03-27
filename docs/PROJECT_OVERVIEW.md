@@ -1,5 +1,9 @@
 # Project Overview
 
+> Historical note:
+> This document still contains early-stage architecture notes from before the ARM64 real-device tunnel fix.
+> For the current verified tunnel path, use `docs/CLOUDFLARE_TUNNEL_SUCCESS_MEMO.md` as the source of truth.
+
 ## Product Intent
 
 The project aims to turn a rooted Android phone into a remotely operated network node.

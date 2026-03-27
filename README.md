@@ -16,13 +16,12 @@ What already exists:
 - a Compose-based control UI
 - a local HTTP API powered by NanoHTTPD on `127.0.0.1:18080`
 - root command execution for network inspection and airplane-mode based IP rotation
-- bundled `cloudflared` download and install logic for Android
-- a fallback tunnel runner that can switch to a Termux-installed `cloudflared` when the bundled binary fails on device DNS resolution
+- a bundled `cloudflared` ARM64 binary shipped inside the APK
+- a foreground-service based tunnel runner validated on a rooted real device
 
 What is not complete yet:
 
-- no end-to-end validation on an emulator
-- no stable background service / boot-start implementation
+- no boot-start implementation
 - no real SOCKS5 / HTTP proxy node backend yet; the "nodes" area is still mostly UI scaffolding
 - no CI, automated tests, or release pipeline
 
@@ -58,14 +57,8 @@ Implemented endpoints:
 Recommended next environment:
 
 - Linux ARM64 development server
-- Android Studio or command-line Android SDK
-- an Android emulator for UI and API smoke tests
-- a rooted real device for final validation of root-only workflows
-
-Important limitation:
-
-- emulator work can validate UI, local API, and basic tunnel process management
-- emulator work cannot fully validate the real rooted-phone workflow, carrier IPv6 behavior, or airplane-mode based IP rotation on production hardware
+- command-line Android SDK
+- a rooted real device for validation of root-only workflows
 
 ## Build
 
