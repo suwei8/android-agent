@@ -34,7 +34,9 @@ import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
@@ -258,6 +260,21 @@ private fun ProxyNode.accessAddressLabel(networkState: NetworkState): String {
     return if (host.contains(':')) "[${host}]:$port" else "$host:$port"
 }
 
+private fun ProxyNode.proxyUri(networkState: NetworkState): String? {
+    val host = accessHost(networkState) ?: return null
+    val authorityHost = if (host.contains(':')) "[${host}]" else host
+    val scheme = when (type) {
+        NodeType.Socks5 -> "socks5"
+        NodeType.Http -> "http"
+    }
+    val userInfo = if (authEnabled) "${username}:${password}@" else ""
+    return "$scheme://$userInfo$authorityHost:$port"
+}
+
+private fun ProxyNode.proxyCopyText(networkState: NetworkState): String {
+    return proxyUri(networkState) ?: accessAddressLabel(networkState)
+}
+
 private fun ProxyNode.bindLabel(): String {
     return when {
         bindHost.contains("+") -> "[::]:$port + 0.0.0.0:$port"
@@ -351,6 +368,7 @@ private fun MobileAgentDemoApp() {
         )
     }
     var showCreateNodeDialog by remember { mutableStateOf(false) }
+    var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
     var selectedNode by remember { mutableStateOf<ProxyNode?>(null) }
     var remoteTokenInput by remember { mutableStateOf(TunnelRuntime.getSavedToken(context)) }
     var remoteDomainInput by remember { mutableStateOf(TunnelRuntime.getSavedDomain(context)) }
@@ -360,6 +378,13 @@ private fun MobileAgentDemoApp() {
 
         val index = nodes.indexOfFirst { it.id == updated.id }
         if (index >= 0) nodes[index] = updated
+    }
+
+    fun deleteNode(target: ProxyNode) {
+        ProxyRuntime.stop(target.id)
+        nodes.removeAll { it.id == target.id }
+        if (selectedNode?.id == target.id) selectedNode = null
+        if (editingNode?.id == target.id) editingNode = null
     }
 
     fun toast(message: String) {
@@ -541,7 +566,10 @@ private fun MobileAgentDemoApp() {
                     }
                 },
 
-                onNewNode = { showCreateNodeDialog = true },
+                onNewNode = {
+                    editingNode = null
+                    showCreateNodeDialog = true
+                },
                 onCopyIp = {
                     val target = networkState.ipv6.takeIf { it != "未获取" } ?: networkState.ipv4
                     clipboard.setText(AnnotatedString(target))
@@ -554,6 +582,14 @@ private fun MobileAgentDemoApp() {
                 nodes = nodes,
                 networkState = networkState,
                 onNodeClick = { selectedNode = it },
+                onEditNode = { node ->
+                    editingNode = node
+                    showCreateNodeDialog = true
+                },
+                onDeleteNode = { node ->
+                    deleteNode(node)
+                    toast("${node.name} 已删除")
+                },
                 onStartNode = { node ->
                     scope.launch {
                         val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
@@ -581,8 +617,8 @@ private fun MobileAgentDemoApp() {
                     }
                 },
                 onCopyAddress = { node ->
-                    clipboard.setText(AnnotatedString(node.accessAddressLabel(networkState)))
-                    toast("访问地址已复制")
+                    clipboard.setText(AnnotatedString(node.proxyCopyText(networkState)))
+                    toast("完整代理 URI 已复制")
                 }
             )
 
@@ -673,17 +709,37 @@ private fun MobileAgentDemoApp() {
     }
 
     if (showCreateNodeDialog) {
-        CreateNodeDialog(
+        NodeEditorDialog(
             networkState = networkState,
-            onDismiss = { showCreateNodeDialog = false },
-            onCreate = { node ->
-                val pendingNode = node.copy(status = NodeStatus.Starting, lastStarted = "启动中")
-                nodes.add(0, pendingNode)
+            initialNode = editingNode,
+            onDismiss = {
+                showCreateNodeDialog = false
+                editingNode = null
+            },
+            onSubmit = { node ->
                 showCreateNodeDialog = false
                 scope.launch {
-                    val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
-                    updateNode(node.applyRuntimeSnapshot(snapshot))
-                    toast(if (snapshot.running) "节点已创建并开始监听" else (snapshot.lastError ?: "节点启动失败"))
+                    val original = editingNode
+                    editingNode = null
+                    if (original == null) {
+                        val pendingNode = node.copy(status = NodeStatus.Starting, lastStarted = "启动中")
+                        nodes.add(0, pendingNode)
+                        val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
+                        val updated = node.applyRuntimeSnapshot(snapshot)
+                        updateNode(updated)
+                        selectedNode = selectedNode?.takeIf { it.id == node.id } ?: selectedNode
+                        toast(if (snapshot.running) "节点已创建并开始监听" else (snapshot.lastError ?: "节点启动失败"))
+                    } else {
+                        val updated = if (original.status == NodeStatus.Running) {
+                            val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
+                            node.applyRuntimeSnapshot(snapshot)
+                        } else {
+                            node
+                        }
+                        updateNode(updated)
+                        selectedNode = selectedNode?.takeIf { it.id == updated.id }?.let { updated }
+                        toast(if (original.status == NodeStatus.Running) "${updated.name} 已重启并应用新配置" else "${updated.name} 已保存")
+                    }
                 }
             },
             nextId = (nodes.maxOfOrNull { it.id } ?: 0) + 1,
@@ -695,6 +751,14 @@ private fun MobileAgentDemoApp() {
             node = node,
             networkState = networkState,
             onDismiss = { selectedNode = null },
+            onEdit = {
+                editingNode = node
+                showCreateNodeDialog = true
+            },
+            onDelete = {
+                deleteNode(node)
+                toast("${node.name} 已删除")
+            },
             onStart = {
                 scope.launch {
                     val snapshot = ProxyRuntime.start(node.toRuntimeConfig())
@@ -714,8 +778,8 @@ private fun MobileAgentDemoApp() {
                 }
             },
             onCopy = {
-                clipboard.setText(AnnotatedString(node.accessAddressLabel(networkState)))
-                toast("节点地址已复制")
+                clipboard.setText(AnnotatedString(node.proxyCopyText(networkState)))
+                toast("完整代理 URI 已复制")
             }
         )
     }
@@ -799,6 +863,8 @@ private fun NodesScreen(
     nodes: List<ProxyNode>,
     networkState: NetworkState,
     onNodeClick: (ProxyNode) -> Unit,
+    onEditNode: (ProxyNode) -> Unit,
+    onDeleteNode: (ProxyNode) -> Unit,
     onStartNode: (ProxyNode) -> Unit,
     onStopNode: (ProxyNode) -> Unit,
     onCopyAddress: (ProxyNode) -> Unit,
@@ -849,16 +915,26 @@ private fun NodesScreen(
                         TinyInfoChip(icon = Icons.Default.PowerSettingsNew, label = "最近启动 ${node.lastStarted}")
                         TinyInfoChip(icon = Icons.Default.CellTower, label = "自检 ${node.localCheckLabel()}")
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilledTonalButton(onClick = { if (node.status == NodeStatus.Running) onStopNode(node) else onStartNode(node) }) {
                             Icon(if (node.status == NodeStatus.Running) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
                             Text(if (node.status == NodeStatus.Running) "停止" else "启动")
                         }
+                        OutlinedButton(onClick = { onEditNode(node) }) {
+                            Icon(Icons.Default.Edit, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("编辑")
+                        }
                         OutlinedButton(onClick = { onCopyAddress(node) }) {
                             Icon(Icons.Default.ContentCopy, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("复制地址")
+                            Text("复制代理")
+                        }
+                        OutlinedButton(onClick = { onDeleteNode(node) }) {
+                            Icon(Icons.Default.Delete, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("删除")
                         }
                     }
                 }
@@ -1114,29 +1190,46 @@ private fun SettingsScreen(
 }
 
 @Composable
-private fun CreateNodeDialog(
+private fun NodeEditorDialog(
     networkState: NetworkState,
+    initialNode: ProxyNode?,
     nextId: Int,
     onDismiss: () -> Unit,
-    onCreate: (ProxyNode) -> Unit,
+    onSubmit: (ProxyNode) -> Unit,
 ) {
-    var name by remember { mutableStateOf("手机代理-$nextId") }
-    var type by remember { mutableStateOf(NodeType.Socks5) }
-    var port by remember { mutableStateOf(type.defaultPort.toString()) }
-    var exitFamily by remember { mutableStateOf(NodeExitFamily.Auto) }
-    var authEnabled by remember { mutableStateOf(true) }
-    var username by remember { mutableStateOf("agent") }
-    var password by remember { mutableStateOf("12345678") }
+    val isEditing = initialNode != null
+    var name by remember(initialNode?.id) { mutableStateOf(initialNode?.name ?: "手机代理-$nextId") }
+    var type by remember(initialNode?.id) { mutableStateOf(initialNode?.type ?: NodeType.Socks5) }
+    var port by remember(initialNode?.id) { mutableStateOf((initialNode?.port ?: (initialNode?.type ?: NodeType.Socks5).defaultPort).toString()) }
+    var exitFamily by remember(initialNode?.id) { mutableStateOf(initialNode?.exitFamily ?: NodeExitFamily.Auto) }
+    var authEnabled by remember(initialNode?.id) { mutableStateOf(initialNode?.authEnabled ?: true) }
+    var username by remember(initialNode?.id) { mutableStateOf(initialNode?.username ?: "agent") }
+    var password by remember(initialNode?.id) { mutableStateOf(initialNode?.password ?: "12345678") }
     var showPassword by remember { mutableStateOf(false) }
     val accessPreview = networkState.publicHostFor(exitFamily) ?: "未获取"
-
-    LaunchedEffect(type) {
-        port = type.defaultPort.toString()
-    }
+    val previewNode = ProxyNode(
+        id = initialNode?.id ?: nextId,
+        name = name.ifBlank { "手机代理-${initialNode?.id ?: nextId}" },
+        type = type,
+        host = accessPreview.takeIf { it != "未获取" } ?: "::",
+        port = port.toIntOrNull() ?: type.defaultPort,
+        exitFamily = exitFamily,
+        bindHost = if ((accessPreview.takeIf { it != "未获取" } ?: "::").contains(':')) "[::] + 0.0.0.0" else "0.0.0.0",
+        authEnabled = authEnabled,
+        username = username,
+        password = password,
+        status = initialNode?.status ?: NodeStatus.Stopped,
+        currentConnections = initialNode?.currentConnections ?: 0,
+        lastStarted = initialNode?.lastStarted ?: "未启动",
+        localIpv4Reachable = initialNode?.localIpv4Reachable,
+        localIpv6Reachable = initialNode?.localIpv6Reachable,
+        localIpv4Status = initialNode?.localIpv4Status ?: "未测",
+        localIpv6Status = initialNode?.localIpv6Status ?: "未测",
+    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("新建节点") },
+        title = { Text(if (isEditing) "编辑节点" else "新建节点") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -1149,7 +1242,10 @@ private fun CreateNodeDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .clickable { type = item }
+                            .clickable {
+                                type = item
+                                port = item.defaultPort.toString()
+                            }
                             .padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -1192,6 +1288,14 @@ private fun CreateNodeDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth()
                 )
+                OutlinedTextField(
+                    value = previewNode.proxyUri(networkState) ?: "当前未获取可用公网地址",
+                    onValueChange = {},
+                    enabled = false,
+                    label = { Text("完整代理 URI") },
+                    supportingText = { Text("复制时会直接复制这个可用 URI，包含协议、认证、地址和端口") },
+                    modifier = Modifier.fillMaxWidth()
+                )
                 ToggleMiniRow(title = "开启用户名密码", checked = authEnabled, onCheckedChange = { authEnabled = it })
                 if (authEnabled) {
                     OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("用户名") }, modifier = Modifier.fillMaxWidth())
@@ -1213,10 +1317,10 @@ private fun CreateNodeDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    onCreate(
+                    onSubmit(
                         ProxyNode(
-                            id = nextId,
-                            name = name.ifBlank { "手机代理-$nextId" },
+                            id = initialNode?.id ?: nextId,
+                            name = name.ifBlank { "手机代理-${initialNode?.id ?: nextId}" },
                             type = type,
                             host = accessPreview.takeIf { it != "未获取" } ?: "::",
                             port = port.toIntOrNull() ?: type.defaultPort,
@@ -1236,7 +1340,7 @@ private fun CreateNodeDialog(
                     )
                 }
             ) {
-                Text("保存并启动")
+                Text(if (isEditing) "保存配置" else "保存并启动")
             }
         },
         dismissButton = {
@@ -1250,6 +1354,8 @@ private fun NodeDetailDialog(
     node: ProxyNode,
     networkState: NetworkState,
     onDismiss: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onCopy: () -> Unit,
@@ -1267,6 +1373,7 @@ private fun NodeDetailDialog(
                 Text("监听方式：全接口监听")
                 Text("监听绑定：${node.bindLabel()}")
                 Text("出口协议族：${node.exitFamily.label}")
+                Text("完整代理 URI：${node.proxyUri(networkState) ?: "当前未获取可用公网地址"}")
                 Text("本机回环自检：${node.localCheckLabel()}")
                 Text("访问认证：${if (node.authEnabled) "已开启" else "未开启"}")
                 if (node.authEnabled) {
@@ -1285,7 +1392,9 @@ private fun NodeDetailDialog(
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onCopy) { Text("复制地址") }
+                TextButton(onClick = onEdit) { Text("编辑") }
+                TextButton(onClick = onDelete) { Text("删除") }
+                TextButton(onClick = onCopy) { Text("复制代理") }
                 TextButton(onClick = onDismiss) { Text("关闭") }
             }
         }
