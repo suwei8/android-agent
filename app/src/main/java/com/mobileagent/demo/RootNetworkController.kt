@@ -25,6 +25,18 @@ internal data class RotateResult(
     val debugLog: List<String>,
 )
 
+internal enum class RotateMode(val apiValue: String, val label: String) {
+    AIRPLANE("airplane", "飞行模式重连"),
+    MOBILE_DATA("mobile_data", "移动数据重连");
+
+    companion object {
+        fun fromApiValue(value: String?): RotateMode? {
+            val normalized = value?.trim().orEmpty()
+            return entries.firstOrNull { it.apiValue.equals(normalized, ignoreCase = true) }
+        }
+    }
+}
+
 internal class RootNetworkController {
     @Volatile
     private var appContext: Context? = null
@@ -38,10 +50,10 @@ internal class RootNetworkController {
     }
 
 
-    suspend fun rotateIp(holdSeconds: Int): RotateResult = withContext(Dispatchers.IO) {
+    suspend fun rotateIp(holdSeconds: Int, mode: RotateMode): RotateResult = withContext(Dispatchers.IO) {
         val debugLog = mutableListOf<String>()
         val before = refreshSnapshotBlocking(debugLog, stage = "切换前")
-        debugLog += "切换前网络：${before.preferredNetworkLabel}，IPv6：${before.currentIpv6 ?: "未获取"}"
+        debugLog += "切换前网络：${before.preferredNetworkLabel}，IPv6：${before.currentIpv6 ?: "未获取"}，模式：${mode.label}"
 
         val rootCheck = runRootCommand("id", timeoutMs = 20_000)
         debugLog += summarizeCommand("Root 检测", rootCheck)
@@ -57,7 +69,10 @@ internal class RootNetworkController {
         }
 
         val hold = holdSeconds.coerceIn(3, 60)
-        val enableResult = setAirplaneMode(enabled = true, debugLog = debugLog)
+        val enableResult = when (mode) {
+            RotateMode.AIRPLANE -> setAirplaneMode(enabled = true, debugLog = debugLog)
+            RotateMode.MOBILE_DATA -> setMobileDataEnabled(enabled = false, debugLog = debugLog)
+        }
         if (!enableResult.first) {
             return@withContext RotateResult(
                 success = false,
@@ -69,10 +84,13 @@ internal class RootNetworkController {
             )
         }
 
-        debugLog += "飞行模式保持 ${hold} 秒"
+        debugLog += "${mode.label}保持 ${hold} 秒"
         Thread.sleep(hold * 1000L)
 
-        val disableResult = setAirplaneMode(enabled = false, debugLog = debugLog)
+        val disableResult = when (mode) {
+            RotateMode.AIRPLANE -> setAirplaneMode(enabled = false, debugLog = debugLog)
+            RotateMode.MOBILE_DATA -> setMobileDataEnabled(enabled = true, debugLog = debugLog)
+        }
         if (!disableResult.first) {
             return@withContext RotateResult(
                 success = false,
@@ -110,7 +128,7 @@ internal class RootNetworkController {
             newIpv6 = newIpv6,
             ipChanged = ipChanged,
             message = if (ipChanged) {
-                "飞行模式切换完成，新的 IPv6 已生效"
+                "${mode.label}完成，新的 IPv6 已生效"
             } else {
                 "网络已恢复，但 IPv6 未发生变化"
             },
@@ -238,6 +256,39 @@ internal class RootNetworkController {
     private fun verifyAirplaneMode(enabled: Boolean, debugLog: MutableList<String>): Boolean {
         val result = runRootCommand("settings get global airplane_mode_on", timeoutMs = 10_000)
         debugLog += summarizeCommand("飞行模式状态校验", result)
+        return result.exitCode == 0 && result.stdout.trim() == if (enabled) "1" else "0"
+    }
+
+    private fun setMobileDataEnabled(enabled: Boolean, debugLog: MutableList<String>): Pair<Boolean, String> {
+        val primaryCommand = if (enabled) "svc data enable" else "svc data disable"
+        val primary = runRootCommand(primaryCommand, timeoutMs = 15_000)
+        debugLog += summarizeCommand(if (enabled) "开启移动数据" else "关闭移动数据", primary)
+        if (primary.exitCode == 0 && verifyMobileDataEnabled(enabled, debugLog)) {
+            return true to ""
+        }
+
+        val fallbackCommand = if (enabled) {
+            "cmd phone data enable"
+        } else {
+            "cmd phone data disable"
+        }
+        val fallback = runRootCommand(fallbackCommand, timeoutMs = 15_000)
+        debugLog += summarizeCommand(if (enabled) "开启移动数据回退" else "关闭移动数据回退", fallback)
+        if (fallback.exitCode == 0 && verifyMobileDataEnabled(enabled, debugLog)) {
+            return true to ""
+        }
+
+        val reason = listOf(primary.stdout, fallback.stdout)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("；")
+            .ifBlank { "系统命令执行失败" }
+        return false to "切换移动数据失败：$reason"
+    }
+
+    private fun verifyMobileDataEnabled(enabled: Boolean, debugLog: MutableList<String>): Boolean {
+        val result = runRootCommand("settings get global mobile_data", timeoutMs = 10_000)
+        debugLog += summarizeCommand("移动数据状态校验", result)
         return result.exitCode == 0 && result.stdout.trim() == if (enabled) "1" else "0"
     }
 

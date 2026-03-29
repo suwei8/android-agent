@@ -172,7 +172,7 @@ private data class NetworkState(
     val ipv6: String,
     val wifiConnected: Boolean,
     val lastRotateAt: String,
-    val rotateMode: String,
+    val rotateMode: RotateMode,
     val holdSeconds: Int,
     val lastError: String?,
     val diagnostics: List<String>,
@@ -327,7 +327,7 @@ private fun MobileAgentDemoApp() {
                 ipv6 = "获取中...",
                 wifiConnected = false,
                 lastRotateAt = "未执行",
-                rotateMode = "飞行模式重连",
+                rotateMode = RotateMode.AIRPLANE,
                 holdSeconds = 10,
                 lastError = null,
                 diagnostics = emptyList(),
@@ -493,6 +493,7 @@ private fun MobileAgentDemoApp() {
         val task = MobileAgentRuntime.submitRotateTask(
             holdSeconds = networkState.holdSeconds,
             title = taskTitle,
+            mode = networkState.rotateMode,
         )
         networkState = networkState.copy(lastRotateAt = "进行中", lastError = null)
         syncRuntimeState(refreshSnapshot = false)
@@ -638,7 +639,10 @@ private fun MobileAgentDemoApp() {
                 },
                 onToggleMode = {
                     networkState = networkState.copy(
-                        rotateMode = if (networkState.rotateMode == "飞行模式重连") "移动数据重连" else "飞行模式重连"
+                        rotateMode = when (networkState.rotateMode) {
+                            RotateMode.AIRPLANE -> RotateMode.MOBILE_DATA
+                            RotateMode.MOBILE_DATA -> RotateMode.AIRPLANE
+                        }
                     )
                 },
                 onCopyDiagnostics = { copyLines("诊断日志", it) },
@@ -831,7 +835,7 @@ private fun OverviewScreen(
                 pairs = listOf(
                     "当前 IPv4" to networkState.ipv4,
                     "IPv6 地址" to networkState.ipv6,
-                    "换 IP 方式" to networkState.rotateMode,
+                    "换 IP 方式" to networkState.rotateMode.label,
                     "最近切换" to networkState.lastRotateAt,
                 )
             )
@@ -982,7 +986,7 @@ private fun NetworkScreen(
                     Text("执行期间网络会短暂中断；界面会展示 root 命令、默认路由和 IPv6 采集诊断")
 
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TinyInfoChip(icon = Icons.Default.SwapHoriz, label = networkState.rotateMode)
+                        TinyInfoChip(icon = Icons.Default.SwapHoriz, label = networkState.rotateMode.label)
                         TinyInfoChip(icon = Icons.Default.Sync, label = "保持 ${networkState.holdSeconds} 秒")
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

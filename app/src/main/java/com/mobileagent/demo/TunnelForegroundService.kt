@@ -15,11 +15,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class TunnelForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var commandJob: Job? = null
+    private var monitorJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -33,6 +36,8 @@ class TunnelForegroundService : Service() {
         commandJob = serviceScope.launch {
             when (action) {
                 actionStop -> {
+                    monitorJob?.cancel()
+                    monitorJob = null
                     val status = TunnelRuntime.stopManagedProcess(applicationContext, lastErrorOverride = null)
                     updateNotification(status)
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -44,6 +49,7 @@ class TunnelForegroundService : Service() {
                         updateNotification(snapshot)
                     }
                     updateNotification(status)
+                    ensureMonitorLoop()
                 }
             }
         }
@@ -52,6 +58,7 @@ class TunnelForegroundService : Service() {
 
     override fun onDestroy() {
         commandJob?.cancel()
+        monitorJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -102,11 +109,44 @@ class TunnelForegroundService : Service() {
         manager.createNotificationChannel(channel)
     }
 
+    private fun ensureMonitorLoop() {
+        if (monitorJob?.isActive == true) {
+            return
+        }
+        monitorJob = serviceScope.launch {
+            var unhealthyPolls = 0
+            while (isActive) {
+                delay(monitorIntervalMs)
+                val status = TunnelRuntime.refreshStatus(applicationContext, lastErrorOverride = null)
+                updateNotification(status)
+
+                val healthy = status.tokenBound && status.running && status.statusLabel == "已连接"
+                if (healthy || !status.tokenBound) {
+                    unhealthyPolls = 0
+                    continue
+                }
+
+                unhealthyPolls += 1
+                if (unhealthyPolls < unhealthyThreshold) {
+                    continue
+                }
+
+                val recovered = TunnelRuntime.startManagedProcess(applicationContext) { snapshot ->
+                    updateNotification(snapshot)
+                }
+                updateNotification(recovered)
+                unhealthyPolls = if (recovered.running && recovered.statusLabel == "已连接") 0 else unhealthyThreshold - 1
+            }
+        }
+    }
+
     companion object {
         private const val actionStart = "com.mobileagent.demo.action.START_TUNNEL"
         private const val actionStop = "com.mobileagent.demo.action.STOP_TUNNEL"
         private const val channelId = "mobile-agent-tunnel"
         private const val notificationId = 1107
+        private const val monitorIntervalMs = 15_000L
+        private const val unhealthyThreshold = 2
 
         fun requestStart(context: Context) {
             val intent = Intent(context, TunnelForegroundService::class.java).setAction(actionStart)

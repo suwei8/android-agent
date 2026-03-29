@@ -138,14 +138,14 @@ internal object MobileAgentRuntime {
         tasks[taskId]
     }
 
-    fun submitRotateTask(holdSeconds: Int, title: String): ApiTaskRecord {
+    fun submitRotateTask(holdSeconds: Int, title: String, mode: RotateMode): ApiTaskRecord {
         val taskId = "rot-${System.currentTimeMillis()}"
         val now = System.currentTimeMillis()
         val pendingTask = ApiTaskRecord(
             id = taskId,
             title = title,
             status = "queued",
-            detail = "任务已创建，等待执行",
+            detail = "任务已创建，等待执行（${mode.label}）",
             createdAt = now,
             updatedAt = now,
         )
@@ -153,10 +153,10 @@ internal object MobileAgentRuntime {
 
         scope.launch {
             updateTask(taskId) { task ->
-                task.copy(status = "running", detail = "正在申请 root 权限并切换飞行模式", updatedAt = System.currentTimeMillis())
+                task.copy(status = "running", detail = "正在申请 root 权限并执行${mode.label}", updatedAt = System.currentTimeMillis())
             }
 
-            val result = controller.rotateIp(holdSeconds)
+            val result = controller.rotateIp(holdSeconds, mode)
             val snapshot = controller.refreshSnapshot()
             latestSnapshot = snapshot
             val debugLines = (result.debugLog + snapshot.details).distinct().takeLast(16)
@@ -222,8 +222,9 @@ internal object MobileAgentRuntime {
                     session.method == Method.POST && session.uri == "/api/network/rotate" -> {
                         val body = parseJsonBody(session)
                         val holdSeconds = body?.optInt("holdSeconds")?.takeIf { it > 0 } ?: 10
+                        val mode = RotateMode.fromApiValue(body?.optString("mode")) ?: RotateMode.AIRPLANE
                         val title = body?.optString("title")?.takeIf { it.isNotBlank() } ?: "API 更换出口 IP"
-                        val task = submitRotateTask(holdSeconds = holdSeconds, title = title)
+                        val task = submitRotateTask(holdSeconds = holdSeconds, title = title, mode = mode)
                         jsonResponse(
                             JSONObject()
                                 .put("ok", true)
